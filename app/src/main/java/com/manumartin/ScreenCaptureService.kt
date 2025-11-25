@@ -265,7 +265,7 @@ class ScreenCaptureService : Service(), TextToSpeech.OnInitListener {
 
     private fun calculateIoU(boxA: RectF, boxB: RectF): Float {
         val xA = max(boxA.left, boxB.left)
-        val yA = max(boxA.top, B.top)
+        val yA = max(boxA.top, boxB.top)
         val xB = min(boxA.right, boxB.right)
         val yB = min(boxA.bottom, boxB.bottom)
 
