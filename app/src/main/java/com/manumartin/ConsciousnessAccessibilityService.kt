@@ -33,10 +33,11 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     private val windowManager by lazy { getSystemService(WINDOW_SERVICE) as WindowManager }
     private val censorViews = mutableListOf<CensorView>()
     private val blocklist = setOf(
-        "pornhub.com", "xvideos.com", "xnxx.com", "chaturbate.com", "redtube.com",
-        "youporn.com", "xhamster.com", "porn.com", "brazzers.com", "adultfriendfinder.com",
+        "pornhub.com", "xvideos.com", "xnxx.com", "chaturbate.com", "redtube.com", "superchatlive.com", "stripchat.com",
+        "youporn.com", "xhamster.com", "porn.com", "brazzers.com", "adultfriendfinder.com", "archivebate.com",
         "nude", "porn", "sexy", "adult entertainment", "erotic", "xxx", "hentai"
     )
+    private val browserPackages = setOf("com.android.chrome", "org.mozilla.firefox", "com.duckduckgo.mobile.android")
     private val handler = Handler(Looper.getMainLooper())
 
     // Visual detection components
@@ -45,6 +46,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     private lateinit var tts: TextToSpeech
     private var lastPrayerTime = 0L
     private var warningCount = 0
+    private var currentPackageName: String? = null
     private val isProcessing = AtomicBoolean(false)
     private var screenshotHandler: Handler? = null
     private var screenshotRunnable: Runnable? = null
@@ -67,7 +69,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         val info = serviceInfo ?: AccessibilityServiceInfo()
         info.eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
         info.flags = info.flags or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
-        info.packageNames = arrayOf("com.android.chrome", "org.mozilla.firefox", "com.duckduckgo.mobile.android")
+        // We remove package filtering to detect app changes globally
         info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
         this.serviceInfo = info
         startScreenshotLoop()
@@ -78,7 +80,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         screenshotRunnable = object : Runnable {
             override fun run() {
                 takeScreenshot()
-                screenshotHandler?.postDelayed(this, 100) // Capture every 0.1 seconds for faster processing
+                screenshotHandler?.postDelayed(this, 1000) // Capture every 0.1 seconds for faster processing
             }
         }
         screenshotHandler?.post(screenshotRunnable!!)
@@ -115,17 +117,29 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || event?.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
-            val rootNode = rootInActiveWindow ?: return
-            findUrlBar(rootNode)?.text?.let { url ->
-                if (isBlocked(url.toString())) {
-                    performGlobalAction(GLOBAL_ACTION_BACK)
-                    handler.post {
-                        Toast.makeText(
-                            applicationContext,
-                            "Incognito browsing of this content is blocked.",
-                            Toast.LENGTH_LONG
-                        ).show()
+        if (event == null) return
+
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && event.packageName != null) {
+            val packageName = event.packageName.toString()
+            if (packageName != currentPackageName) {
+                currentPackageName = packageName
+                warningCount = 0
+            }
+        }
+
+        if (event.packageName != null && browserPackages.contains(event.packageName.toString())) {
+            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+                val rootNode = rootInActiveWindow ?: return
+                findUrlBar(rootNode)?.text?.let { url ->
+                    if (isBlocked(url.toString())) {
+                        performGlobalAction(GLOBAL_ACTION_BACK)
+                        handler.post {
+                            Toast.makeText(
+                                applicationContext,
+                                "Incognito browsing of this content is blocked.",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
                     }
                 }
             }
@@ -232,9 +246,9 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
 
                     if (label in SENSITIVE_LABELS) {
                         sensitiveContentInFrame = true
-                        if (maxScore > 0.75f && (System.currentTimeMillis() - lastPrayerTime > 5000)) {
+                        if (maxScore > 0.5f && (System.currentTimeMillis() - lastPrayerTime > 10000)) {
                             lastPrayerTime = System.currentTimeMillis()
-                            tts.speak("Hail Mary Full of Grace...", TextToSpeech.QUEUE_FLUSH, null, "prayer")
+                            tts.speak("Hail Mary Full of Grace, the Lord is with you. Blessed are you among women, Blessed is the fruit of thy womb Jesus", TextToSpeech.QUEUE_FLUSH, null, "prayer")
                         }
                     }
                 }
@@ -244,16 +258,15 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                 warningCount++
                 handler.post { Toast.makeText(applicationContext, "Warning ($warningCount)", Toast.LENGTH_SHORT).show() }
                 
-                if (warningCount >= 3) {
+                if (warningCount >= 5) {
                     performGlobalAction(GLOBAL_ACTION_HOME)
                     handler.post { 
                         Toast.makeText(applicationContext, "Closing application due to repeated sensitive content", Toast.LENGTH_LONG).show() 
                     }
                     warningCount = 0
                 }
-            } else {
-                warningCount = 0
             }
+            // Removed else block to prevent resetting count on clean frames
 
             nonMaxSuppression(boxes).forEach { addCensorView(Rect(it.box.left.toInt(), it.box.top.toInt(), it.box.right.toInt(), it.box.bottom.toInt())) }
 
