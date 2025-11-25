@@ -6,11 +6,13 @@ import ai.onnxruntime.OrtSession
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.annotation.SuppressLint
+import android.app.admin.DevicePolicyManager
+import android.content.ComponentName
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.RectF
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
@@ -22,6 +24,12 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Toast
 import androidx.core.graphics.scale
+import com.google.firebase.FirebaseApp
+import com.google.firebase.database.DataSnapshot
+import com.google.firebase.database.DatabaseError
+import com.google.firebase.database.FirebaseDatabase
+import com.google.firebase.database.ServerValue
+import com.google.firebase.database.ValueEventListener
 import java.nio.FloatBuffer
 import java.util.*
 import java.util.concurrent.atomic.AtomicBoolean
@@ -31,12 +39,19 @@ import kotlin.math.min
 class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.OnInitListener {
 
     private val windowManager by lazy { getSystemService(WINDOW_SERVICE) as WindowManager }
+    private val devicePolicyManager by lazy { getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager }
+    private val adminComponent by lazy { ComponentName(this, ConsciousnessDeviceAdminReceiver::class.java) }
     private val censorViews = mutableListOf<CensorView>()
-    private val blocklist = setOf(
+    
+    // Default blocklist
+    private val defaultBlocklist = setOf(
         "pornhub.com", "xvideos.com", "xnxx.com", "chaturbate.com", "redtube.com", "superchatlive.com", "stripchat.com",
         "youporn.com", "xhamster.com", "porn.com", "brazzers.com", "adultfriendfinder.com", "archivebate.com",
         "nude", "porn", "sexy", "adult entertainment", "erotic", "xxx", "hentai"
     )
+    // Combined blocklist (Default + Remote)
+    private val activeBlocklist = mutableSetOf<String>().apply { addAll(defaultBlocklist) }
+    
     private val browserPackages = setOf("com.android.chrome", "org.mozilla.firefox", "com.duckduckgo.mobile.android")
     private val handler = Handler(Looper.getMainLooper())
 
@@ -47,12 +62,22 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     private var lastPrayerTime = 0L
     private var warningCount = 0
     private var currentPackageName: String? = null
+    
+    // Blocking logic
+    private val blockedPackages = mutableMapOf<String, Long>()
+
     private val isProcessing = AtomicBoolean(false)
     private var screenshotHandler: Handler? = null
     private var screenshotRunnable: Runnable? = null
 
+    // Remote Control
+    private var isFilteringDisabled = false
+    private var filteringDisabledUntil = 0L
+    private lateinit var database: FirebaseDatabase
+
     override fun onCreate() {
         super.onCreate()
+        Log.e(TAG, "Consciousness Service Created")
         instance = this
         ortEnvironment = OrtEnvironment.getEnvironment()
         tts = TextToSpeech(this, this)
@@ -61,6 +86,95 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
             session = ortEnvironment.createSession(model)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load ONNX model", e)
+        }
+        
+        try {
+            if (FirebaseApp.getApps(this).isEmpty()) {
+                FirebaseApp.initializeApp(this)
+                Log.e(TAG, "Firebase initialized manually")
+            }
+            database = FirebaseDatabase.getInstance("https://alphonso-c7f69-default-rtdb.asia-southeast1.firebasedatabase.app")
+            setupRemoteConfig()
+        } catch (e: Exception) {
+             Log.e(TAG, "Firebase Critical Error", e)
+        }
+    }
+
+    private fun setupRemoteConfig() {
+        if (!::database.isInitialized) return
+        Log.d(TAG, "Setting up remote config...")
+        try {
+            val configRef = database.getReference("config")
+            
+            // Listener for disabling/enabling filtering remotely
+            configRef.child("disableFilteringUntil").addValueEventListener(object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) {
+                    val disabledUntil = snapshot.getValue(Long::class.java)
+                    if (disabledUntil != null) {
+                        filteringDisabledUntil = disabledUntil
+                        checkFilteringStatus()
+                        Log.d(TAG, "Remote config updated: disableFilteringUntil=$disabledUntil")
+                    }
+                }
+                override fun onCancelled(error: DatabaseError) {
+                    Log.e(TAG, "Remote config failed", error.toException())
+                }
+            })
+
+            // Listener for adding blocked domains/keywords remotely
+            configRef.child("blocklist").addValueEventListener(object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) {
+                    activeBlocklist.clear()
+                    activeBlocklist.addAll(defaultBlocklist)
+                    
+                    for (child in snapshot.children) {
+                        val item = child.getValue(String::class.java)
+                        if (!item.isNullOrBlank()) {
+                            activeBlocklist.add(item)
+                        }
+                    }
+                    Log.d(TAG, "Blocklist updated from remote. Total items: ${activeBlocklist.size}")
+                }
+                override fun onCancelled(error: DatabaseError) {
+                    Log.e(TAG, "Remote blocklist update failed", error.toException())
+                }
+            })
+            Log.d(TAG, "Firebase listeners attached successfully")
+            
+        } catch (e: Exception) {
+             Log.e(TAG, "Firebase init failed (make sure google-services.json is present)", e)
+        }
+    }
+    
+    private fun checkFilteringStatus() {
+        val now = System.currentTimeMillis()
+        if (now < filteringDisabledUntil) {
+            isFilteringDisabled = true
+            handler.post { Toast.makeText(applicationContext, "Filtering disabled by admin", Toast.LENGTH_LONG).show() }
+        } else {
+             isFilteringDisabled = false
+        }
+    }
+
+    private fun logIncident(type: String, details: String, packageName: String? = currentPackageName, labels: List<String>? = null) {
+        if (!::database.isInitialized) return
+        Log.d(TAG, "Attempting to log incident: $type - $details")
+        try {
+            val incidentsRef = database.getReference("incidents")
+            val incident = mutableMapOf<String, Any>(
+                "timestamp" to ServerValue.TIMESTAMP,
+                "type" to type,
+                "details" to details,
+                "packageName" to (packageName ?: "unknown")
+            )
+            if (labels != null) {
+                incident["labels"] = labels
+            }
+            incidentsRef.push().setValue(incident)
+                .addOnSuccessListener { Log.d(TAG, "Incident logged to Firebase successfully") }
+                .addOnFailureListener { e -> Log.e(TAG, "Failed to write to Firebase", e) }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to log incident", e)
         }
     }
 
@@ -73,14 +187,29 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
         this.serviceInfo = info
         startScreenshotLoop()
+        Toast.makeText(this, "Consciousness Service Connected", Toast.LENGTH_SHORT).show()
+        logIncident("service_connected", "Service enabled by user")
     }
 
     private fun startScreenshotLoop() {
         screenshotHandler = Handler(Looper.getMainLooper())
         screenshotRunnable = object : Runnable {
             override fun run() {
-                takeScreenshot()
-                screenshotHandler?.postDelayed(this, 1000) // Capture every 0.1 seconds for faster processing
+                // Logic to auto-re-enable filtering if timer expired
+                val now = System.currentTimeMillis()
+                val shouldBeDisabled = now < filteringDisabledUntil
+                
+                if (isFilteringDisabled != shouldBeDisabled) {
+                    isFilteringDisabled = shouldBeDisabled
+                    if (!isFilteringDisabled) {
+                         handler.post { Toast.makeText(applicationContext, "Filtering re-enabled", Toast.LENGTH_SHORT).show() }
+                    }
+                }
+
+                if (!isFilteringDisabled) {
+                    takeScreenshot()
+                }
+                screenshotHandler?.postDelayed(this, 1000) 
             }
         }
         screenshotHandler?.post(screenshotRunnable!!)
@@ -88,6 +217,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
 
     @SuppressLint("WrongThread")
     private fun takeScreenshot() {
+        val capturedPackage = currentPackageName
         takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
             override fun onSuccess(screenshot: ScreenshotResult) {
                 val hardwareBuffer = screenshot.hardwareBuffer
@@ -97,7 +227,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                 if (bitmap != null) {
                     if (isProcessing.compareAndSet(false, true)) {
                         try {
-                            processImage(bitmap)
+                            processImage(bitmap, capturedPackage)
                         } finally {
                             isProcessing.set(false)
                         }
@@ -121,17 +251,32 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
 
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && event.packageName != null) {
             val packageName = event.packageName.toString()
+
+            // Check if this package is currently blocked
+            val releaseTime = blockedPackages[packageName]
+            if (releaseTime != null) {
+                if (System.currentTimeMillis() < releaseTime) {
+                    enforceBlock("App locked for 3 mins")
+                    return
+                } else {
+                    blockedPackages.remove(packageName)
+                }
+            }
+
             if (packageName != currentPackageName) {
                 currentPackageName = packageName
                 warningCount = 0
             }
         }
+        
+        if (isFilteringDisabled) return
 
         if (event.packageName != null && browserPackages.contains(event.packageName.toString())) {
             if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
                 val rootNode = rootInActiveWindow ?: return
                 findUrlBar(rootNode)?.text?.let { url ->
                     if (isBlocked(url.toString())) {
+                        logIncident("url_blocked", url.toString(), event.packageName.toString())
                         performGlobalAction(GLOBAL_ACTION_BACK)
                         handler.post {
                             Toast.makeText(
@@ -147,7 +292,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     }
 
     private fun isBlocked(url: String): Boolean {
-        return blocklist.any { url.contains(it, ignoreCase = true) }
+        return activeBlocklist.any { url.contains(it, ignoreCase = true) }
     }
 
     private fun findUrlBar(nodeInfo: AccessibilityNodeInfo): AccessibilityNodeInfo? {
@@ -195,19 +340,33 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         }
     }
 
+    private fun enforceBlock(message: String) {
+        performGlobalAction(GLOBAL_ACTION_HOME)
+        
+        // Delay the lock slightly to ensure the home screen intent has started processing,
+        // reducing the chance of re-opening the blocked app upon unlock.
+        handler.postDelayed({
+            if (devicePolicyManager.isAdminActive(adminComponent)) {
+                devicePolicyManager.lockNow()
+            }
+        }, 200)
+        
+        handler.post { Toast.makeText(applicationContext, message, Toast.LENGTH_LONG).show() }
+    }
+
     // --- Merged from ScreenCaptureService ---
 
-    private fun processImage(bitmap: Bitmap) {
+    private fun processImage(bitmap: Bitmap, capturedPackageName: String?) {
         val resizedBitmap = bitmap.scale(320, 320)
         val inputTensor = preProcess(resizedBitmap)
         val tensor = OnnxTensor.createTensor(ortEnvironment, inputTensor, longArrayOf(1, 3, 320, 320))
         val results = session.run(Collections.singletonMap(session.inputNames.iterator().next(), tensor))
-        processOutputs(results, bitmap.width, bitmap.height)
+        processOutputs(results, bitmap.width, bitmap.height, capturedPackageName)
         bitmap.recycle()
         resizedBitmap.recycle()
     }
 
-    private fun processOutputs(results: OrtSession.Result, originalWidth: Int, originalHeight: Int) {
+    private fun processOutputs(results: OrtSession.Result, originalWidth: Int, originalHeight: Int, capturedPackageName: String?) {
         clearCensorViews()
         try {
             val outputTensor = results[0].value as? Array<Array<FloatArray>>
@@ -228,6 +387,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
             val scaleX = originalWidth / 320f
             val scaleY = originalHeight / 320f
             var sensitiveContentInFrame = false
+            val detectedLabels = mutableListOf<String>()
 
             for (i in 0 until numDetections) {
                 val detection = transposedDetections[i]
@@ -246,6 +406,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
 
                     if (label in SENSITIVE_LABELS) {
                         sensitiveContentInFrame = true
+                        detectedLabels.add(label)
                         if (maxScore > 0.5f && (System.currentTimeMillis() - lastPrayerTime > 10000)) {
                             lastPrayerTime = System.currentTimeMillis()
                             tts.speak("Hail Mary Full of Grace, the Lord is with you. Blessed are you among women, Blessed is the fruit of thy womb Jesus", TextToSpeech.QUEUE_FLUSH, null, "prayer")
@@ -255,15 +416,22 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
             }
 
             if (sensitiveContentInFrame) {
-                warningCount++
-                handler.post { Toast.makeText(applicationContext, "Warning ($warningCount)", Toast.LENGTH_SHORT).show() }
-                
-                if (warningCount >= 5) {
-                    performGlobalAction(GLOBAL_ACTION_HOME)
-                    handler.post { 
-                        Toast.makeText(applicationContext, "Closing application due to repeated sensitive content", Toast.LENGTH_LONG).show() 
+                // Ensure we only warn/block if the user is still in the same app or if we want to penalize that specific app
+                if (capturedPackageName == currentPackageName) {
+                    
+                    logIncident("visual_detection", "Sensitive content detected", capturedPackageName, detectedLabels)
+                    
+                    warningCount++
+                    handler.post { Toast.makeText(applicationContext, "Warning ($warningCount)", Toast.LENGTH_SHORT).show() }
+                    
+                    if (warningCount >= 5) {
+                        capturedPackageName?.let { pkg ->
+                            blockedPackages[pkg] = System.currentTimeMillis() + 3 * 60 * 1000
+                            logIncident("app_blocked", "Blocked for 3 mins due to repeated detections", pkg)
+                        }
+                        enforceBlock("Closing application due to repeated sensitive content")
+                        warningCount = 0
                     }
-                    warningCount = 0
                 }
             }
             // Removed else block to prevent resetting count on clean frames
