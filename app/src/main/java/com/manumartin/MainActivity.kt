@@ -57,24 +57,35 @@ class MainActivity : ComponentActivity() {
     fun MainScreen() {
         var disableUntil by remember { mutableStateOf(0L) }
         var timeRemaining by remember { mutableStateOf("") }
-        
+        var highConfidenceThreshold by remember { mutableStateOf(0.75f) } // Add this
+
         LaunchedEffect(Unit) {
             if (::database.isInitialized) {
-                // Fetch the initial value immediately (for "Button to fetch" requirement, although listening is better)
-                // But since user asked for a button to fetch, maybe listening is not working?
-                // Let's keep listening as it's reactive.
-                // The user said "the problem is with listening we can give a button to fetch the value from DB".
-                // I will add a manual refresh button too.
-                
-                val configRef = database.getReference("config/disableFilteringUntil")
-                configRef.addValueEventListener(object : ValueEventListener {
+                val configRef = database.getReference("config")
+
+                configRef.child("disableFilteringUntil").addValueEventListener(object : ValueEventListener {
                     override fun onDataChange(snapshot: DataSnapshot) {
                         val value = snapshot.getValue(Long::class.java)
                         if (value != null) {
                             disableUntil = value
                         }
                     }
-                    override fun onCancelled(error: DatabaseError) {}
+                    override fun onCancelled(error: DatabaseError) {
+                        Log.w("MainActivity", "Failed to read disableFilteringUntil.", error.toException())
+                    }
+                })
+
+                // Add this listener
+                configRef.child("highConfidenceThreshold").addValueEventListener(object : ValueEventListener {
+                    override fun onDataChange(snapshot: DataSnapshot) {
+                        val value = snapshot.getValue(Double::class.java)?.toFloat()
+                        if (value != null && value in 0f..1f) {
+                            highConfidenceThreshold = value
+                        }
+                    }
+                    override fun onCancelled(error: DatabaseError) {
+                        Log.w("MainActivity", "Failed to read highConfidenceThreshold.", error.toException())
+                    }
                 })
             }
         }
@@ -117,12 +128,16 @@ class MainActivity : ComponentActivity() {
             Button(onClick = { 
                 // Manual Fetch Button
                 if (::database.isInitialized) {
-                     database.getReference("config/disableFilteringUntil").get().addOnSuccessListener { snapshot ->
-                         val value = snapshot.getValue(Long::class.java)
-                         if (value != null) {
-                             disableUntil = value
-                             Toast.makeText(this@MainActivity, "Updated status", Toast.LENGTH_SHORT).show()
+                     database.getReference("config").get().addOnSuccessListener { snapshot ->
+                         val disableValue = snapshot.child("disableFilteringUntil").getValue(Long::class.java)
+                         if (disableValue != null) {
+                             disableUntil = disableValue
                          }
+                         val thresholdValue = snapshot.child("highConfidenceThreshold").getValue(Double::class.java)?.toFloat()
+                         if (thresholdValue != null && thresholdValue in 0f..1f) {
+                             highConfidenceThreshold = thresholdValue
+                         }
+                         Toast.makeText(this@MainActivity, "Updated status", Toast.LENGTH_SHORT).show()
                      }
                 }
             }) {
@@ -133,6 +148,10 @@ class MainActivity : ComponentActivity() {
                 Spacer(modifier = Modifier.height(16.dp))
                 Text("Filter Disabled For: $timeRemaining")
             }
+
+            // Add this text
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(String.format("High Confidence Detection Threshold: %.2f", highConfidenceThreshold*100))
         }
     }
 

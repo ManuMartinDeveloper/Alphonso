@@ -73,6 +73,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     // Remote Control
     private var isFilteringDisabled = false
     private var filteringDisabledUntil = 0L
+    private var highConfidenceThreshold = 0.75f // Default value
     private lateinit var database: FirebaseDatabase
 
     override fun onCreate() {
@@ -137,6 +138,21 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                 }
                 override fun onCancelled(error: DatabaseError) {
                     Log.e(TAG, "Remote blocklist update failed", error.toException())
+                }
+            })
+            
+            configRef.child("highConfidenceThreshold").addValueEventListener(object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) {
+                    // Firebase RTDB stores floating point numbers as Double
+                    val threshold = snapshot.getValue(Double::class.java)?.toFloat()
+                    if (threshold != null && threshold in 0f..1f) {
+                        highConfidenceThreshold = threshold
+                        Log.d(TAG, "Remote config updated: highConfidenceThreshold=$highConfidenceThreshold")
+                        handler.post { Toast.makeText(applicationContext, "Detection threshold set to: $highConfidenceThreshold", Toast.LENGTH_SHORT).show() }
+                    }
+                }
+                override fun onCancelled(error: DatabaseError) {
+                    Log.e(TAG, "Remote threshold update failed", error.toException())
                 }
             })
             Log.d(TAG, "Firebase listeners attached successfully")
@@ -386,9 +402,8 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
             val boxes = mutableListOf<Detection>()
             val scaleX = originalWidth / 320f
             val scaleY = originalHeight / 320f
-            var highConfidenceSensitiveContentInFrame = false
-            val detectedLabels = mutableListOf<String>()
-            val highConfidenceThreshold = 0.7f
+            var hasHighConfidenceSensitiveContent = false
+            val detectedSensitiveLabels = mutableListOf<String>()
 
             for (i in 0 until numDetections) {
                 val detection = transposedDetections[i]
@@ -406,9 +421,9 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                     boxes.add(Detection(RectF(x1, y1, x2, y2), maxScore, classIndex))
 
                     if (label in SENSITIVE_LABELS) {
-                        detectedLabels.add(label)
+                        detectedSensitiveLabels.add(label)
                         if (maxScore > highConfidenceThreshold) {
-                            highConfidenceSensitiveContentInFrame = true
+                            hasHighConfidenceSensitiveContent = true
                             if ((System.currentTimeMillis() - lastPrayerTime > 10000)) {
                                 lastPrayerTime = System.currentTimeMillis()
                                 tts.speak("Hail Mary Full of Grace, the Lord is with you. Blessed are you among women, Blessed is the fruit of thy womb Jesus", TextToSpeech.QUEUE_FLUSH, null, "prayer")
@@ -418,11 +433,11 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                 }
             }
 
-            if (highConfidenceSensitiveContentInFrame) {
+            if (hasHighConfidenceSensitiveContent) {
                 // Ensure we only warn/block if the user is still in the same app or if we want to penalize that specific app
                 if (capturedPackageName == currentPackageName) {
                     
-                    logIncident("visual_detection", "Sensitive content detected", capturedPackageName, detectedLabels)
+                    logIncident("visual_detection", "High-confidence sensitive content detected", capturedPackageName, detectedSensitiveLabels)
                     
                     warningCount++
                     handler.post { Toast.makeText(applicationContext, "Warning ($warningCount)", Toast.LENGTH_SHORT).show() }
@@ -437,9 +452,11 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                     }
                 }
             }
-            // Removed else block to prevent resetting count on clean frames
-
-            nonMaxSuppression(boxes).forEach { addCensorView(Rect(it.box.left.toInt(), it.box.top.toInt(), it.box.right.toInt(), it.box.bottom.toInt())) }
+            
+            // Censor all detected sensitive content boxes, regardless of confidence
+            nonMaxSuppression(boxes).filter { LABELS[it.classIndex] in SENSITIVE_LABELS }.forEach { 
+                addCensorView(Rect(it.box.left.toInt(), it.box.top.toInt(), it.box.right.toInt(), it.box.bottom.toInt())) 
+            }
 
         } catch (e: Exception) {
             Log.e(TAG, "Error processing model outputs", e)
