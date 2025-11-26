@@ -386,8 +386,9 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
             val boxes = mutableListOf<Detection>()
             val scaleX = originalWidth / 320f
             val scaleY = originalHeight / 320f
-            var sensitiveContentInFrame = false
+            var highConfidenceSensitiveContentInFrame = false
             val detectedLabels = mutableListOf<String>()
+            val highConfidenceThreshold = 0.7f
 
             for (i in 0 until numDetections) {
                 val detection = transposedDetections[i]
@@ -405,17 +406,19 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                     boxes.add(Detection(RectF(x1, y1, x2, y2), maxScore, classIndex))
 
                     if (label in SENSITIVE_LABELS) {
-                        sensitiveContentInFrame = true
                         detectedLabels.add(label)
-                        if (maxScore > 0.5f && (System.currentTimeMillis() - lastPrayerTime > 10000)) {
-                            lastPrayerTime = System.currentTimeMillis()
-                            tts.speak("Hail Mary Full of Grace, the Lord is with you. Blessed are you among women, Blessed is the fruit of thy womb Jesus", TextToSpeech.QUEUE_FLUSH, null, "prayer")
+                        if (maxScore > highConfidenceThreshold) {
+                            highConfidenceSensitiveContentInFrame = true
+                            if ((System.currentTimeMillis() - lastPrayerTime > 10000)) {
+                                lastPrayerTime = System.currentTimeMillis()
+                                tts.speak("Hail Mary Full of Grace, the Lord is with you. Blessed are you among women, Blessed is the fruit of thy womb Jesus", TextToSpeech.QUEUE_FLUSH, null, "prayer")
+                            }
                         }
                     }
                 }
             }
 
-            if (sensitiveContentInFrame) {
+            if (highConfidenceSensitiveContentInFrame) {
                 // Ensure we only warn/block if the user is still in the same app or if we want to penalize that specific app
                 if (capturedPackageName == currentPackageName) {
                     
