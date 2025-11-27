@@ -41,7 +41,7 @@ class DebugActivity : ComponentActivity() {
         // Initialize Firebase (Ensure google-services.json is valid)
         try {
             database = FirebaseDatabase.getInstance("https://alphonso-c7f69-default-rtdb.asia-southeast1.firebasedatabase.app")
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             // Handle offline or config errors gracefully
         }
 
@@ -86,7 +86,7 @@ class DebugActivity : ComponentActivity() {
                 logs.filter {
                     try {
                         selectedFilters.contains(LogEventType.valueOf(it.eventType))
-                    } catch (e: Exception) { false }
+                    } catch (_: Exception) { false }
                 }
             }
 
@@ -98,7 +98,7 @@ class DebugActivity : ComponentActivity() {
                     activityScope.launch(Dispatchers.IO) {
                         eventLogDao.clearAll()
                         // Optional: Clear Firebase if connected
-                        try { database.getReference("incidents").removeValue() } catch (e: Exception) {}
+                        try { database.getReference("incidents").removeValue() } catch (_: Exception) {}
                         withContext(Dispatchers.Main) { setLogs(emptyList()) }
                     }
                 },
@@ -167,7 +167,7 @@ fun DebugScreen(
         }
 
         LazyRow(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
-            items(LogEventType.values()) { type ->
+            items(LogEventType.entries) { type ->
                 FilterChip(
                     selected = selectedFilters.contains(type),
                     onClick = {
@@ -192,7 +192,7 @@ fun DebugScreen(
 @Composable
 fun EventLogItem(log: EventLogEntity, onFlagFalsePositive: (Int) -> Unit) {
     val timeFormat = SimpleDateFormat("HH:mm:ss dd-MM", Locale.getDefault())
-    val eventType = try { LogEventType.valueOf(log.eventType) } catch (e: Exception) { LogEventType.SERVICE_EVENT }
+    val eventType = try { LogEventType.valueOf(log.eventType) } catch (_: Exception) { LogEventType.SERVICE_EVENT }
 
     val color = when {
         log.isFalsePositive -> Color.Yellow
