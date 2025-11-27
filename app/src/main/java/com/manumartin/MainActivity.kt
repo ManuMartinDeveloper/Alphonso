@@ -4,6 +4,7 @@ import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
@@ -11,7 +12,10 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -34,9 +38,11 @@ class MainActivity : ComponentActivity() {
     }
     
     private lateinit var database: FirebaseDatabase
+    private lateinit var sharedPrefs: SharedPreferences
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        sharedPrefs = getSharedPreferences("AlphonsoPrefs", Context.MODE_PRIVATE)
         
         try {
             if (FirebaseApp.getApps(this).isEmpty()) {
@@ -57,7 +63,8 @@ class MainActivity : ComponentActivity() {
     fun MainScreen() {
         var disableUntil by remember { mutableStateOf(0L) }
         var timeRemaining by remember { mutableStateOf("") }
-        var highConfidenceThreshold by remember { mutableStateOf(0.75f) } // Add this
+        val labelThresholds = remember { mutableStateMapOf<String, Float>() }
+        var allowMobileData by remember { mutableStateOf(sharedPrefs.getBoolean("allowMobileDataBackup", false)) }
 
         LaunchedEffect(Unit) {
             if (::database.isInitialized) {
@@ -75,16 +82,20 @@ class MainActivity : ComponentActivity() {
                     }
                 })
 
-                // Add this listener
-                configRef.child("highConfidenceThreshold").addValueEventListener(object : ValueEventListener {
+                configRef.child("labelThresholds").addValueEventListener(object : ValueEventListener {
                     override fun onDataChange(snapshot: DataSnapshot) {
-                        val value = snapshot.getValue(Double::class.java)?.toFloat()
-                        if (value != null && value in 0f..1f) {
-                            highConfidenceThreshold = value
+                        val remoteThresholds = snapshot.value as? Map<String, Any>
+                        remoteThresholds?.let {
+                            for ((label, value) in it) {
+                                val floatValue = (value as? Double)?.toFloat()
+                                if (floatValue != null) {
+                                    labelThresholds[label] = floatValue
+                                }
+                            }
                         }
                     }
                     override fun onCancelled(error: DatabaseError) {
-                        Log.w("MainActivity", "Failed to read highConfidenceThreshold.", error.toException())
+                        Log.w("MainActivity", "Failed to read labelThresholds.", error.toException())
                     }
                 })
             }
@@ -107,7 +118,7 @@ class MainActivity : ComponentActivity() {
         }
 
         Column(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().padding(16.dp),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
@@ -126,17 +137,21 @@ class MainActivity : ComponentActivity() {
             
             Spacer(modifier = Modifier.height(16.dp))
             Button(onClick = { 
-                // Manual Fetch Button
                 if (::database.isInitialized) {
                      database.getReference("config").get().addOnSuccessListener { snapshot ->
                          val disableValue = snapshot.child("disableFilteringUntil").getValue(Long::class.java)
                          if (disableValue != null) {
                              disableUntil = disableValue
                          }
-                         val thresholdValue = snapshot.child("highConfidenceThreshold").getValue(Double::class.java)?.toFloat()
-                         if (thresholdValue != null && thresholdValue in 0f..1f) {
-                             highConfidenceThreshold = thresholdValue
-                         }
+                        val remoteThresholds = snapshot.child("labelThresholds").value as? Map<String, Any>
+                        remoteThresholds?.let {
+                            for ((label, value) in it) {
+                                val floatValue = (value as? Double)?.toFloat()
+                                if (floatValue != null) {
+                                    labelThresholds[label] = floatValue
+                                }
+                            }
+                        }
                          Toast.makeText(this@MainActivity, "Updated status", Toast.LENGTH_SHORT).show()
                      }
                 }
@@ -149,9 +164,38 @@ class MainActivity : ComponentActivity() {
                 Text("Filter Disabled For: $timeRemaining")
             }
 
-            // Add this text
             Spacer(modifier = Modifier.height(16.dp))
-            Text(String.format("High Confidence Detection Threshold: %.2f", highConfidenceThreshold*100))
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Allow Backup on Mobile Data")
+                Spacer(modifier = Modifier.width(8.dp))
+                Switch(
+                    checked = allowMobileData,
+                    onCheckedChange = {
+                        allowMobileData = it
+                        sharedPrefs.edit().putBoolean("allowMobileDataBackup", it).apply()
+                        NightlyBatchWorker.schedule(applicationContext, it)
+                        Toast.makeText(applicationContext, "Settings updated", Toast.LENGTH_SHORT).show()
+                    }
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            LazyColumn(modifier = Modifier.weight(1f)) {
+                item { 
+                    Text("Label Sensitivities:", modifier = Modifier.padding(bottom = 8.dp))
+                }
+                items(ConsciousnessAccessibilityService.SENSITIVE_LABELS.toList()) { label ->
+                    val threshold = labelThresholds[label] ?: 0.75f
+                    Text(String.format("  %s: %.0f%%", label, threshold * 100))
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            Button(onClick = { openDebugLog() }) {
+                Text("Show Debug Log")
+            }
         }
     }
 
@@ -165,7 +209,7 @@ class MainActivity : ComponentActivity() {
         if (!dpm.isAdminActive(deviceAdminSample)) {
             val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
             intent.putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, deviceAdminSample)
-            intent.putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION, "Enable Device Admin to protect your device.")
+            intent.putExtra(DevicePolicy.EXTRA_ADD_EXPLANATION, "Enable Device Admin to protect your device.")
             startActivity(intent)
         } else {
             Toast.makeText(this, "Device Admin is already enabled.", Toast.LENGTH_SHORT).show()
@@ -191,5 +235,10 @@ class MainActivity : ComponentActivity() {
             .addOnFailureListener { 
                 Toast.makeText(this, "Failed to send request", Toast.LENGTH_SHORT).show() 
             }
+    }
+
+    private fun openDebugLog() {
+        val intent = Intent(this, DebugActivity::class.java)
+        startActivity(intent)
     }
 }

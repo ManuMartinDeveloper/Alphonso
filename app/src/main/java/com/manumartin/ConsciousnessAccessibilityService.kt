@@ -1,15 +1,17 @@
 package com.manumartin
 
-import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.annotation.SuppressLint
+import android.app.ActivityManager
 import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Context
+import android.content.SharedPreferences
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.RectF
@@ -24,22 +26,48 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Toast
 import androidx.core.graphics.scale
+import androidx.room.Room
 import com.google.firebase.FirebaseApp
 import com.google.firebase.database.DataSnapshot
 import com.google.firebase.database.DatabaseError
 import com.google.firebase.database.FirebaseDatabase
 import com.google.firebase.database.ServerValue
 import com.google.firebase.database.ValueEventListener
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import java.io.File
+import java.io.FileOutputStream
 import java.nio.FloatBuffer
 import java.util.*
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 import kotlin.math.min
 
+enum class LogEventType {
+    DETECTION,
+    WARNING,
+    APP_BLOCKED,
+    APP_RELEASED,
+    SERVICE_EVENT,
+    FALSE_POSITIVE,
+    RETRAINING
+}
+
+data class EventLog(
+    val id: String = UUID.randomUUID().toString(),
+    val timestamp: Long,
+    val type: LogEventType,
+    val packageName: String,
+    val details: String,
+    var isFalsePositive: Boolean = false
+)
+
 class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.OnInitListener {
 
     private val windowManager by lazy { getSystemService(WINDOW_SERVICE) as WindowManager }
     private val devicePolicyManager by lazy { getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager }
+    private val activityManager by lazy { getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager }
     private val adminComponent by lazy { ComponentName(this, ConsciousnessDeviceAdminReceiver::class.java) }
     private val censorViews = mutableListOf<CensorView>()
     
@@ -73,18 +101,34 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     // Remote Control
     private var isFilteringDisabled = false
     private var filteringDisabledUntil = 0L
-    private var highConfidenceThreshold = 0.75f // Default value
     private lateinit var database: FirebaseDatabase
+
+    // Local Database
+    private lateinit var db: EventLogDatabase
+    private lateinit var eventLogDao: EventLogDao
+    private val serviceScope = CoroutineScope(Dispatchers.IO)
+    private lateinit var sharedPrefs: SharedPreferences
 
     override fun onCreate() {
         super.onCreate()
         Log.e(TAG, "Consciousness Service Created")
         instance = this
+        sharedPrefs = getSharedPreferences("AlphonsoPrefs", Context.MODE_PRIVATE)
+
+        db = Room.databaseBuilder(
+            applicationContext,
+            EventLogDatabase::class.java, "event-log-database"
+        ).build()
+        eventLogDao = db.eventLogDao()
+
+        SENSITIVE_LABELS.forEach { label ->
+            labelThresholds.putIfAbsent(label, 0.75f)
+        }
         ortEnvironment = OrtEnvironment.getEnvironment()
         tts = TextToSpeech(this, this)
         try {
-            val model = resources.assets.open("nudenet_320n.onnx").readBytes()
-            session = ortEnvironment.createSession(model)
+            val modelFile = getModelFile(applicationContext)
+            session = ortEnvironment.createSession(modelFile.absolutePath)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load ONNX model", e)
         }
@@ -99,6 +143,31 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         } catch (e: Exception) {
              Log.e(TAG, "Firebase Critical Error", e)
         }
+
+        // Schedule the nightly worker
+        val allowMobileData = sharedPrefs.getBoolean("allowMobileDataBackup", false)
+        NightlyBatchWorker.schedule(applicationContext, allowMobileData)
+    }
+
+    private fun getModelFile(context: Context): File {
+        val refinedModel = File(context.filesDir, "refined_model.onnx")
+        if (refinedModel.exists()) {
+            Log.d(TAG, "Loading refined model.")
+            return refinedModel
+        }
+
+        Log.d(TAG, "No refined model found. Using default model from assets.")
+        val assetManager = context.assets
+        val defaultModelFile = File(context.filesDir, "nudenet_320n.onnx")
+        if (!defaultModelFile.exists()) {
+             assetManager.open("nudenet_320n.onnx").use { inputStream ->
+                FileOutputStream(defaultModelFile).use { outputStream ->
+                    inputStream.copyTo(outputStream)
+                }
+            }
+        }
+       
+        return defaultModelFile
     }
 
     private fun setupRemoteConfig() {
@@ -107,7 +176,6 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         try {
             val configRef = database.getReference("config")
             
-            // Listener for disabling/enabling filtering remotely
             configRef.child("disableFilteringUntil").addValueEventListener(object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
                     val disabledUntil = snapshot.getValue(Long::class.java)
@@ -122,7 +190,6 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                 }
             })
 
-            // Listener for adding blocked domains/keywords remotely
             configRef.child("blocklist").addValueEventListener(object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
                     activeBlocklist.clear()
@@ -141,20 +208,33 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                 }
             })
             
-            configRef.child("highConfidenceThreshold").addValueEventListener(object : ValueEventListener {
+            configRef.child("labelThresholds").addValueEventListener(object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
-                    // Firebase RTDB stores floating point numbers as Double
-                    val threshold = snapshot.getValue(Double::class.java)?.toFloat()
-                    if (threshold != null && threshold in 0f..1f) {
-                        highConfidenceThreshold = threshold
-                        Log.d(TAG, "Remote config updated: highConfidenceThreshold=$highConfidenceThreshold")
-                        handler.post { Toast.makeText(applicationContext, "Detection threshold set to: $highConfidenceThreshold", Toast.LENGTH_SHORT).show() }
+                    try {
+                        val remoteThresholds = snapshot.value as? Map<String, Any>
+                        remoteThresholds?.let {
+                            var updated = false
+                            for ((label, value) in it) {
+                                val floatValue = (value as? Double)?.toFloat()
+                                if (floatValue != null && label in SENSITIVE_LABELS && labelThresholds[label] != floatValue) {
+                                    labelThresholds[label] = floatValue
+                                    updated = true
+                                }
+                            }
+                            if (updated) {
+                                Log.d(TAG, "Remote config updated: labelThresholds=$labelThresholds")
+                                handler.post { Toast.makeText(applicationContext, "Label sensitivities updated.", Toast.LENGTH_SHORT).show() }
+                            }
+                        }
+                    } catch(e: Exception) {
+                        Log.e(TAG, "Error processing remote labelThresholds", e)
                     }
                 }
                 override fun onCancelled(error: DatabaseError) {
-                    Log.e(TAG, "Remote threshold update failed", error.toException())
+                    Log.e(TAG, "Remote labelThresholds update failed", error.toException())
                 }
             })
+
             Log.d(TAG, "Firebase listeners attached successfully")
             
         } catch (e: Exception) {
@@ -172,7 +252,21 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         }
     }
 
-    private fun logIncident(type: String, details: String, packageName: String? = currentPackageName, labels: List<String>? = null) {
+    private fun logEvent(type: LogEventType, packageName: String, details: String) {
+        serviceScope.launch {
+            val logEntry = EventLogEntity(
+                id = UUID.randomUUID().toString(),
+                timestamp = System.currentTimeMillis(),
+                eventType = type.name,
+                packageName = packageName,
+                details = details,
+                isFalsePositive = false
+            )
+            eventLogDao.insert(logEntry)
+        }
+    }
+
+    private fun logIncident(type: String, details: String, packageName: String? = currentPackageName, labels: List<Map<String, Any>>? = null) {
         if (!::database.isInitialized) return
         Log.d(TAG, "Attempting to log incident: $type - $details")
         try {
@@ -199,11 +293,11 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         val info = serviceInfo ?: AccessibilityServiceInfo()
         info.eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
         info.flags = info.flags or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
-        // We remove package filtering to detect app changes globally
         info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
         this.serviceInfo = info
         startScreenshotLoop()
         Toast.makeText(this, "Consciousness Service Connected", Toast.LENGTH_SHORT).show()
+        logEvent(LogEventType.SERVICE_EVENT, applicationContext.packageName, "Service connected")
         logIncident("service_connected", "Service enabled by user")
     }
 
@@ -211,7 +305,6 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         screenshotHandler = Handler(Looper.getMainLooper())
         screenshotRunnable = object : Runnable {
             override fun run() {
-                // Logic to auto-re-enable filtering if timer expired
                 val now = System.currentTimeMillis()
                 val shouldBeDisabled = now < filteringDisabledUntil
                 
@@ -219,6 +312,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                     isFilteringDisabled = shouldBeDisabled
                     if (!isFilteringDisabled) {
                          handler.post { Toast.makeText(applicationContext, "Filtering re-enabled", Toast.LENGTH_SHORT).show() }
+                         logEvent(LogEventType.SERVICE_EVENT, applicationContext.packageName, "Filtering re-enabled")
                     }
                 }
 
@@ -253,8 +347,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
             }
 
             override fun onFailure(errorCode: Int) {
-                // 3 is TAKE_SCREENSHOT_FAILURE_WINDOW_IS_OBSCURED
-                if (errorCode != 3) {
+                if (errorCode != 3) { // 3 is TAKE_SCREENSHOT_FAILURE_WINDOW_IS_OBSCURED
                     Log.e(TAG, "Screenshot failed with error code: $errorCode")
                 }
                 clearCensorViews()
@@ -268,14 +361,16 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && event.packageName != null) {
             val packageName = event.packageName.toString()
 
-            // Check if this package is currently blocked
             val releaseTime = blockedPackages[packageName]
             if (releaseTime != null) {
                 if (System.currentTimeMillis() < releaseTime) {
-                    enforceBlock("App locked for 3 mins")
+                    enforceBlock("App locked for 3 mins", packageName)
                     return
                 } else {
                     blockedPackages.remove(packageName)
+                    censorViews.forEach { it.setColor(Color.BLACK) }
+                    Toast.makeText(this, "App released", Toast.LENGTH_SHORT).show()
+                    logEvent(LogEventType.APP_RELEASED, packageName, "Block timer expired")
                 }
             }
 
@@ -335,8 +430,9 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         return null
     }
 
-    fun addCensorView(bounds: Rect) {
+    fun addCensorView(bounds: Rect, color: Int) {
         val censorView = CensorView(this)
+        censorView.setColor(color)
         val params = WindowManager.LayoutParams(
             bounds.width(), bounds.height(), bounds.left, bounds.top,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
@@ -356,11 +452,13 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         }
     }
 
-    private fun enforceBlock(message: String) {
+    private fun enforceBlock(message: String, packageName: String?) {
         performGlobalAction(GLOBAL_ACTION_HOME)
-        
-        // Delay the lock slightly to ensure the home screen intent has started processing,
-        // reducing the chance of re-opening the blocked app upon unlock.
+
+        packageName?.let {
+            activityManager.killBackgroundProcesses(it)
+        }
+
         handler.postDelayed({
             if (devicePolicyManager.isAdminActive(adminComponent)) {
                 devicePolicyManager.lockNow()
@@ -369,8 +467,6 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         
         handler.post { Toast.makeText(applicationContext, message, Toast.LENGTH_LONG).show() }
     }
-
-    // --- Merged from ScreenCaptureService ---
 
     private fun processImage(bitmap: Bitmap, capturedPackageName: String?) {
         val resizedBitmap = bitmap.scale(320, 320)
@@ -403,7 +499,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
             val scaleX = originalWidth / 320f
             val scaleY = originalHeight / 320f
             var hasHighConfidenceSensitiveContent = false
-            val detectedSensitiveLabels = mutableListOf<String>()
+            val detectedSensitiveLabelsWithConfidence = mutableListOf<Map<String, Any>>()
 
             for (i in 0 until numDetections) {
                 val detection = transposedDetections[i]
@@ -421,8 +517,13 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                     boxes.add(Detection(RectF(x1, y1, x2, y2), maxScore, classIndex))
 
                     if (label in SENSITIVE_LABELS) {
-                        detectedSensitiveLabels.add(label)
-                        if (maxScore > highConfidenceThreshold) {
+                        val details = "Label: $label, Confidence: ${String.format("%.2f", maxScore)}"
+                        logEvent(LogEventType.DETECTION, capturedPackageName ?: "unknown", details)
+                        
+                        detectedSensitiveLabelsWithConfidence.add(mapOf("label" to label, "confidence" to maxScore))
+
+                        val threshold = labelThresholds[label] ?: 0.75f
+                        if (maxScore > threshold) {
                             hasHighConfidenceSensitiveContent = true
                             if ((System.currentTimeMillis() - lastPrayerTime > 10000)) {
                                 lastPrayerTime = System.currentTimeMillis()
@@ -432,30 +533,31 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                     }
                 }
             }
+            val censorColor = if (warningCount >= 4) Color.RED else if (warningCount > 0) Color.YELLOW else Color.BLACK
 
             if (hasHighConfidenceSensitiveContent) {
-                // Ensure we only warn/block if the user is still in the same app or if we want to penalize that specific app
                 if (capturedPackageName == currentPackageName) {
                     
-                    logIncident("visual_detection", "High-confidence sensitive content detected", capturedPackageName, detectedSensitiveLabels)
+                    logIncident("visual_detection", "High-confidence sensitive content detected", capturedPackageName, detectedSensitiveLabelsWithConfidence)
                     
                     warningCount++
+                    logEvent(LogEventType.WARNING, capturedPackageName ?: "unknown", "Warning count escalated to $warningCount")
                     handler.post { Toast.makeText(applicationContext, "Warning ($warningCount)", Toast.LENGTH_SHORT).show() }
                     
                     if (warningCount >= 5) {
                         capturedPackageName?.let { pkg ->
                             blockedPackages[pkg] = System.currentTimeMillis() + 3 * 60 * 1000
                             logIncident("app_blocked", "Blocked for 3 mins due to repeated detections", pkg)
+                            logEvent(LogEventType.APP_BLOCKED, pkg, "Blocked for 3 mins. Countdown started.")
                         }
-                        enforceBlock("Closing application due to repeated sensitive content")
+                        enforceBlock("Closing application due to repeated sensitive content", capturedPackageName)
                         warningCount = 0
                     }
                 }
             }
             
-            // Censor all detected sensitive content boxes, regardless of confidence
             nonMaxSuppression(boxes).filter { LABELS[it.classIndex] in SENSITIVE_LABELS }.forEach { 
-                addCensorView(Rect(it.box.left.toInt(), it.box.top.toInt(), it.box.right.toInt(), it.box.bottom.toInt())) 
+                addCensorView(Rect(it.box.left.toInt(), it.box.top.toInt(), it.box.right.toInt(), it.box.bottom.toInt()), censorColor) 
             }
 
         } catch (e: Exception) {
@@ -533,17 +635,29 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
 
     companion object {
         var instance: ConsciousnessAccessibilityService? = null
+        // The in-memory log is now deprecated, but we keep it for the DebugActivity
+        val eventLog = Collections.synchronizedList(mutableListOf<EventLog>()) // Public log
         private const val TAG = "ConsciousnessService"
+        val SENSITIVE_LABELS = setOf(
+            "BUTTOCKS_EXPOSED", "FEMALE_BREAST_EXPOSED", "FEMALE_GENITALIA_EXPOSED",
+            "ANUS_EXPOSED", "MALE_GENITALIA_EXPOSED"
+        )
+        val labelThresholds = Collections.synchronizedMap(mutableMapOf<String, Float>())
+
+        fun flagEventAsFalsePositive(logId: String) {
+            instance?.serviceScope?.launch {
+                instance?.eventLogDao?.flagAsFalsePositive(logId)
+                // Also log the flagging event itself
+                instance?.logEvent(LogEventType.FALSE_POSITIVE, "N/A", "Marked as false positive: $logId")
+            }
+        }
+
         private val LABELS = arrayOf(
             "FEMALE_GENITALIA_COVERED", "FACE_FEMALE", "BUTTOCKS_EXPOSED", "FEMALE_BREAST_EXPOSED",
             "FEMALE_GENITALIA_EXPOSED", "MALE_BREAST_EXPOSED", "ANUS_EXPOSED", "FEET_EXPOSED",
             "BELLY_COVERED", "FEET_COVERED", "ARMPITS_COVERED", "ARMPITS_EXPOSED", "FACE_MALE",
             "BELLY_EXPOSED", "MALE_GENITALIA_EXPOSED", "ANUS_COVERED", "FEMALE_BREAST_COVERED",
             "BUTTOCKS_COVERED"
-        )
-        private val SENSITIVE_LABELS = setOf(
-            "BUTTOCKS_EXPOSED", "FEMALE_BREAST_EXPOSED", "FEMALE_GENITALIA_EXPOSED",
-            "ANUS_EXPOSED", "MALE_GENITALIA_EXPOSED"
         )
     }
 }

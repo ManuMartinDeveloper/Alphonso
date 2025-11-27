@@ -19,4 +19,9 @@ class CensorView(context: Context) : View(context) {
         super.onDraw(canvas)
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
     }
+
+    fun setColor(color: Int) {
+        paint.color = color
+        invalidate()
+    }
 }

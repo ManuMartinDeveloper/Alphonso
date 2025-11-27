@@ -2,14 +2,14 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    id("com.google.devtools.ksp")
     id("com.google.gms.google-services")
+    id("org.jetbrains.kotlin.plugin.serialization") version "2.0.0"
 }
 
 android {
     namespace = "com.manumartin"
-    compileSdk {
-        version = release(36)
-    }
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.manumartin"
@@ -40,10 +40,16 @@ android {
     buildFeatures {
         compose = true
     }
-    aaptOptions {
-        noCompress("onnx")
+    androidResources {
+        noCompress += listOf("onnx", "ckpt")
+    }
+
+    packaging {
+        jniLibs.pickFirsts.add("lib/**/libonnxruntime.so")
+        jniLibs.pickFirsts.add("lib/**/libonnxruntime_training.so")
     }
 }
+
 
 dependencies {
     implementation(libs.androidx.core.ktx)
@@ -54,12 +60,23 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.23.2")
     
+    // ONNX Runtime for on-device training (includes inference capabilities)
+    implementation("com.microsoft.onnxruntime:onnxruntime-training-android:1.17.3")
+
     // Firebase
     implementation(platform("com.google.firebase:firebase-bom:33.0.0"))
     implementation("com.google.firebase:firebase-database-ktx")
     implementation("com.google.firebase:firebase-common-ktx")
+    implementation("com.google.firebase:firebase-storage-ktx") // For model backup
+
+    // Room
+    implementation("androidx.room:room-runtime:2.6.1")
+    ksp("androidx.room:room-compiler:2.6.1")
+    implementation("androidx.room:room-ktx:2.6.1")
+
+    // WorkManager
+    implementation("androidx.work:work-runtime-ktx:2.9.0")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
