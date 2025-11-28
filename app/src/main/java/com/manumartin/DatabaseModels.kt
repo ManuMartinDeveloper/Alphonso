@@ -28,25 +28,25 @@ data class EventLogEntity(
 // 3. The DAO (Database Access Object)
 @Dao
 interface EventLogDao {
-    // Get all logs sorted by newest first
     @Query("SELECT * FROM event_logs ORDER BY timestamp DESC")
     suspend fun getAll(): List<EventLogEntity>
 
-    // Insert a new log
     @Insert
     suspend fun insert(log: EventLogEntity)
 
-    // Clear all logs (for the "Clear" button)
     @Query("DELETE FROM event_logs")
     suspend fun clearAll()
 
-    // Mark a specific log as a False Positive
     @Query("UPDATE event_logs SET isFalsePositive = 1 WHERE id = :id")
     suspend fun markAsFalsePositive(id: Int)
+
+    // NEW: Allow undoing the flag
+    @Query("UPDATE event_logs SET isFalsePositive = 0 WHERE id = :id")
+    suspend fun unmarkFalsePositive(id: Int)
 }
 
 // 4. The Database Class
-@Database(entities = [EventLogEntity::class], version = 1)
+@Database(entities = [EventLogEntity::class], version = 1, exportSchema = false)
 abstract class EventLogDatabase : RoomDatabase() {
     abstract fun eventLogDao(): EventLogDao
 }

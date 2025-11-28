@@ -38,14 +38,10 @@ class DebugActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Initialize Firebase (Ensure google-services.json is valid)
         try {
             database = FirebaseDatabase.getInstance("https://alphonso-c7f69-default-rtdb.asia-southeast1.firebasedatabase.app")
-        } catch (_: Exception) {
-            // Handle offline or config errors gracefully
-        }
+        } catch (e: Exception) {}
 
-        // Initialize Local Room Database
         val db = Room.databaseBuilder(
             applicationContext,
             EventLogDatabase::class.java, "event-log-database"
@@ -56,11 +52,9 @@ class DebugActivity : ComponentActivity() {
             val (logs, setLogs) = remember { mutableStateOf<List<EventLogEntity>>(emptyList()) }
             val (selectedFilters, setFilters) = remember { mutableStateOf(emptySet<LogEventType>()) }
 
-            // Observe WorkManager for the Nightly Batch Job
             val workManager = WorkManager.getInstance(applicationContext)
             val workInfo by workManager.getWorkInfosForUniqueWorkLiveData("NightlyBatchWork").observeAsState()
 
-            // Safe unpacking of WorkInfo
             val currentWorkInfo = workInfo?.firstOrNull()
             val trainingState = currentWorkInfo?.state
             val trainingProgress = currentWorkInfo?.progress?.getString("KEY_PROGRESS")
@@ -72,12 +66,11 @@ class DebugActivity : ComponentActivity() {
                 }
             }
 
-            // Refresh logs when training succeeds or app opens
             LaunchedEffect(Unit, trainingState) {
                 if (trainingState == WorkInfo.State.SUCCEEDED) {
                     refreshLogs()
                 }
-                refreshLogs() // Initial load
+                refreshLogs()
             }
 
             val filteredLogs = if (selectedFilters.isEmpty()) {
@@ -86,7 +79,7 @@ class DebugActivity : ComponentActivity() {
                 logs.filter {
                     try {
                         selectedFilters.contains(LogEventType.valueOf(it.eventType))
-                    } catch (_: Exception) { false }
+                    } catch (e: Exception) { false }
                 }
             }
 
@@ -97,23 +90,24 @@ class DebugActivity : ComponentActivity() {
                 onClearLog = {
                     activityScope.launch(Dispatchers.IO) {
                         eventLogDao.clearAll()
-                        // Optional: Clear Firebase if connected
-                        try { database.getReference("incidents").removeValue() } catch (_: Exception) {}
+                        try { database.getReference("incidents").removeValue() } catch (e: Exception) {}
                         withContext(Dispatchers.Main) { setLogs(emptyList()) }
                     }
                 },
                 onFlagFalsePositive = { logId ->
                     activityScope.launch(Dispatchers.IO) {
-                        // Mark in DB
                         eventLogDao.markAsFalsePositive(logId)
-                        // Trigger logic (Placeholder)
-                        // ConsciousnessAccessibilityService.flagEventAsFalsePositive(logId)
+                        withContext(Dispatchers.Main) { refreshLogs() }
+                    }
+                },
+                onUndoFalsePositive = { logId ->
+                    activityScope.launch(Dispatchers.IO) {
+                        eventLogDao.unmarkFalsePositive(logId)
                         withContext(Dispatchers.Main) { refreshLogs() }
                     }
                 },
                 onRetrain = {
-                    // Trigger the Worker manually
-                    // NightlyBatchWorker.runManually(applicationContext)
+                    // Manual trigger logic would go here
                 },
                 trainingState = trainingState,
                 trainingProgress = trainingProgress
@@ -128,7 +122,8 @@ fun DebugScreen(
     selectedFilters: Set<LogEventType>,
     onFilterChanged: (Set<LogEventType>) -> Unit,
     onClearLog: () -> Unit,
-    onFlagFalsePositive: (Int) -> Unit, // Changed String to Int for Room ID usually
+    onFlagFalsePositive: (Int) -> Unit,
+    onUndoFalsePositive: (Int) -> Unit, // New Callback
     onRetrain: () -> Unit,
     trainingState: WorkInfo.State?,
     trainingProgress: String?
@@ -167,7 +162,7 @@ fun DebugScreen(
         }
 
         LazyRow(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
-            items(LogEventType.entries) { type ->
+            items(LogEventType.values()) { type ->
                 FilterChip(
                     selected = selectedFilters.contains(type),
                     onClick = {
@@ -183,21 +178,25 @@ fun DebugScreen(
 
         LazyColumn(modifier = Modifier.weight(1f)) {
             items(eventLog) {
-                EventLogItem(it, onFlagFalsePositive)
+                EventLogItem(it, onFlagFalsePositive, onUndoFalsePositive)
             }
         }
     }
 }
 
 @Composable
-fun EventLogItem(log: EventLogEntity, onFlagFalsePositive: (Int) -> Unit) {
+fun EventLogItem(
+    log: EventLogEntity,
+    onFlagFalsePositive: (Int) -> Unit,
+    onUndoFalsePositive: (Int) -> Unit
+) {
     val timeFormat = SimpleDateFormat("HH:mm:ss dd-MM", Locale.getDefault())
-    val eventType = try { LogEventType.valueOf(log.eventType) } catch (_: Exception) { LogEventType.SERVICE_EVENT }
+    val eventType = try { LogEventType.valueOf(log.eventType) } catch (e: Exception) { LogEventType.SERVICE_EVENT }
 
     val color = when {
-        log.isFalsePositive -> Color.Yellow
-        eventType == LogEventType.DETECTION -> Color.Red.copy(alpha=0.2f)
-        eventType == LogEventType.WARNING -> Color(0xFFFFA500).copy(alpha=0.3f) // Orange
+        log.isFalsePositive -> Color.Yellow.copy(alpha=0.3f)
+        eventType == LogEventType.DETECTION -> Color.Red.copy(alpha=0.1f)
+        eventType == LogEventType.WARNING -> Color(0xFFFFA500).copy(alpha=0.2f) // Orange
         else -> Color.Transparent
     }
 
@@ -211,13 +210,36 @@ fun EventLogItem(log: EventLogEntity, onFlagFalsePositive: (Int) -> Unit) {
         Column(modifier = Modifier.weight(3f)) {
             Text("[${log.packageName}]", fontSize = 12.sp, color = Color.Blue)
             Text(log.details, fontSize = 14.sp)
+
+            // NEW: Show Confidence Score prominently
+            if (log.confidenceScore > 0) {
+                Text(
+                    text = "Confidence: ${(log.confidenceScore * 100).toInt()}%",
+                    fontSize = 12.sp,
+                    color = Color.Magenta,
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                )
+            }
+
             Text(timeFormat.format(Date(log.timestamp)), fontSize = 10.sp, color = Color.Gray)
         }
 
-        if (eventType == LogEventType.DETECTION && !log.isFalsePositive) {
+        if (eventType == LogEventType.DETECTION) {
             Spacer(modifier = Modifier.width(8.dp))
-            Button(onClick = { onFlagFalsePositive(log.id) }) {
-                Text("Flag Mistake")
+
+            if (log.isFalsePositive) {
+                // UNDO BUTTON
+                Button(
+                    onClick = { onUndoFalsePositive(log.id) },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color.DarkGray)
+                ) {
+                    Text("Undo")
+                }
+            } else {
+                // FLAG BUTTON
+                Button(onClick = { onFlagFalsePositive(log.id) }) {
+                    Text("Flag Mistake")
+                }
             }
         }
     }
