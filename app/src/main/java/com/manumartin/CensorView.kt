@@ -22,10 +22,8 @@ class CensorView(context: Context) : View(context) {
         super.onDraw(canvas)
 
         if (isLockedDown) {
-            // Punishment: Block EVERYTHING
             canvas.drawColor(Color.BLACK)
         } else {
-            // Selective: Block specific parts
             for (rect in blockedAreas) {
                 canvas.drawRect(rect, paint)
             }

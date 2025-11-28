@@ -28,6 +28,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Schedule the Nightly Worker
         val workRequest = PeriodicWorkRequestBuilder<NightlyBatchWorker>(24, TimeUnit.HOURS)
             .setConstraints(
                 Constraints.Builder()

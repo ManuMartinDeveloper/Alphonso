@@ -55,16 +55,17 @@ class SettingsActivity : ComponentActivity() {
                 override fun onCancelled(error: DatabaseError) {}
             })
 
+            // *** ROBUST Firebase Threshold Listener ***
             val threshRef = db.getReference("config/thresholds")
             val threshListener = threshRef.addValueEventListener(object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
                     thresholds.clear()
                     snapshot.children.forEach { child ->
-                        val index = child.key?.toIntOrNull()
-                        val value = child.getValue(Float::class.java)
-                        if (index != null && value != null) {
-                            val name = ConsciousnessAccessibilityService.ALL_CLASSES.getOrElse(index) { "$index" }
-                            thresholds[name] = "${(value * 100).toInt()}%"
+                        val labelName = child.key
+                        // Robustly get value as Number and convert to Float, handling different numeric types.
+                        val value = child.getValue(Number::class.java)?.toFloat()
+                        if (labelName != null && value != null) {
+                            thresholds[labelName] = "${(value * 100).toInt()}%"
                         }
                     }
                 }
@@ -114,7 +115,7 @@ class SettingsActivity : ComponentActivity() {
                 }
 
                 Spacer(modifier = Modifier.height(24.dp))
-                Divider()
+                HorizontalDivider()
                 Spacer(modifier = Modifier.height(24.dp))
 
                 Row(
@@ -124,7 +125,7 @@ class SettingsActivity : ComponentActivity() {
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text("Global Lockdown Blackout", fontWeight = FontWeight.Bold)
-                        Text("Screen goes black on 5th strike. (Small boxes always active)", fontSize = 12.sp, color = Color.Gray)
+                        Text("Black out entire screen on 5th strike.", fontSize = 12.sp, color = Color.Gray)
                     }
                     Switch(
                         checked = censorEnabled,
@@ -137,7 +138,7 @@ class SettingsActivity : ComponentActivity() {
                 }
 
                 Spacer(modifier = Modifier.height(24.dp))
-                Divider()
+                HorizontalDivider()
                 Spacer(modifier = Modifier.height(8.dp))
 
                 Text("Remote Sensitivity (Read-Only)", fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))

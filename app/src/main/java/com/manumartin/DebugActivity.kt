@@ -16,6 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.room.Room
@@ -49,8 +50,8 @@ class DebugActivity : ComponentActivity() {
         eventLogDao = db.eventLogDao()
 
         setContent {
-            val (logs, setLogs) = remember { mutableStateOf<List<EventLogEntity>>(emptyList()) }
-            val (selectedFilters, setFilters) = remember { mutableStateOf(emptySet<LogEventType>()) }
+            val logs = remember { mutableStateOf<List<EventLogEntity>>(emptyList()) }
+            val selectedFilters = remember { mutableStateOf(emptySet<LogEventType>()) }
 
             val workManager = WorkManager.getInstance(applicationContext)
             val workInfo by workManager.getWorkInfosForUniqueWorkLiveData("NightlyBatchWork").observeAsState()
@@ -62,7 +63,7 @@ class DebugActivity : ComponentActivity() {
             fun refreshLogs() {
                 activityScope.launch {
                     val allLogs = withContext(Dispatchers.IO) { eventLogDao.getAll() }
-                    setLogs(allLogs)
+                    logs.value = allLogs
                 }
             }
 
@@ -73,25 +74,25 @@ class DebugActivity : ComponentActivity() {
                 refreshLogs()
             }
 
-            val filteredLogs = if (selectedFilters.isEmpty()) {
-                logs
+            val filteredLogs = if (selectedFilters.value.isEmpty()) {
+                logs.value
             } else {
-                logs.filter {
+                logs.value.filter {
                     try {
-                        selectedFilters.contains(LogEventType.valueOf(it.eventType))
+                        selectedFilters.value.contains(LogEventType.valueOf(it.eventType))
                     } catch (e: Exception) { false }
                 }
             }
 
             DebugScreen(
                 eventLog = filteredLogs,
-                selectedFilters = selectedFilters,
-                onFilterChanged = { setFilters(it) },
+                selectedFilters = selectedFilters.value,
+                onFilterChanged = { selectedFilters.value = it },
                 onClearLog = {
                     activityScope.launch(Dispatchers.IO) {
                         eventLogDao.clearAll()
                         try { database.getReference("incidents").removeValue() } catch (e: Exception) {}
-                        withContext(Dispatchers.Main) { setLogs(emptyList()) }
+                        withContext(Dispatchers.Main) { logs.value = emptyList() }
                     }
                 },
                 onFlagFalsePositive = { logId ->
@@ -102,7 +103,7 @@ class DebugActivity : ComponentActivity() {
                 },
                 onUndoFalsePositive = { logId ->
                     activityScope.launch(Dispatchers.IO) {
-                        eventLogDao.unmarkFalsePositive(logId)
+                        eventLogDao.unmarkAsFalsePositive(logId)
                         withContext(Dispatchers.Main) { refreshLogs() }
                     }
                 },
@@ -123,7 +124,7 @@ fun DebugScreen(
     onFilterChanged: (Set<LogEventType>) -> Unit,
     onClearLog: () -> Unit,
     onFlagFalsePositive: (Int) -> Unit,
-    onUndoFalsePositive: (Int) -> Unit, // New Callback
+    onUndoFalsePositive: (Int) -> Unit,
     onRetrain: () -> Unit,
     trainingState: WorkInfo.State?,
     trainingProgress: String?
@@ -177,8 +178,8 @@ fun DebugScreen(
         }
 
         LazyColumn(modifier = Modifier.weight(1f)) {
-            items(eventLog) {
-                EventLogItem(it, onFlagFalsePositive, onUndoFalsePositive)
+            items(eventLog) { log ->
+                EventLogItem(log, onFlagFalsePositive, onUndoFalsePositive)
             }
         }
     }
@@ -194,9 +195,9 @@ fun EventLogItem(
     val eventType = try { LogEventType.valueOf(log.eventType) } catch (e: Exception) { LogEventType.SERVICE_EVENT }
 
     val color = when {
-        log.isFalsePositive -> Color.Yellow.copy(alpha=0.3f)
+        log.isFalsePositive -> Color.Yellow.copy(alpha=0.4f)
         eventType == LogEventType.DETECTION -> Color.Red.copy(alpha=0.1f)
-        eventType == LogEventType.WARNING -> Color(0xFFFFA500).copy(alpha=0.2f) // Orange
+        eventType == LogEventType.WARNING -> Color(0xFFFFA500).copy(alpha=0.2f)
         else -> Color.Transparent
     }
 
@@ -208,27 +209,26 @@ fun EventLogItem(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(modifier = Modifier.weight(3f)) {
-            Text("[${log.packageName}]", fontSize = 12.sp, color = Color.Blue)
+            Text("[${log.packageName}]", fontSize = 12.sp, color = Color.Blue, fontWeight = FontWeight.Bold)
             Text(log.details, fontSize = 14.sp)
 
-            // NEW: Show Confidence Score prominently
             if (log.confidenceScore > 0) {
                 Text(
                     text = "Confidence: ${(log.confidenceScore * 100).toInt()}%",
                     fontSize = 12.sp,
                     color = Color.Magenta,
-                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                    fontWeight = FontWeight.Bold
                 )
             }
 
             Text(timeFormat.format(Date(log.timestamp)), fontSize = 10.sp, color = Color.Gray)
         }
 
-        if (eventType == LogEventType.DETECTION) {
+        // *** LOGIC TO SHOW/HIDE BUTTONS ***
+        if (eventType == LogEventType.DETECTION || eventType == LogEventType.WARNING || eventType == LogEventType.APP_BLOCKED) {
             Spacer(modifier = Modifier.width(8.dp))
 
             if (log.isFalsePositive) {
-                // UNDO BUTTON
                 Button(
                     onClick = { onUndoFalsePositive(log.id) },
                     colors = ButtonDefaults.buttonColors(containerColor = Color.DarkGray)
@@ -236,7 +236,6 @@ fun EventLogItem(
                     Text("Undo")
                 }
             } else {
-                // FLAG BUTTON
                 Button(onClick = { onFlagFalsePositive(log.id) }) {
                     Text("Flag Mistake")
                 }
