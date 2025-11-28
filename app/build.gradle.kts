@@ -4,7 +4,7 @@ plugins {
     alias(libs.plugins.kotlin.compose)
     id("com.google.devtools.ksp")
     id("com.google.gms.google-services")
-    id("org.jetbrains.kotlin.plugin.serialization") version "2.0.0"
+    id("org.jetbrains.kotlin.plugin.serialization")
 }
 
 android {
@@ -52,6 +52,9 @@ android {
 
 
 dependencies {
+    // ONNX Runtime for on-device training (includes inference capabilities)
+    implementation("com.microsoft.onnxruntime:onnxruntime-training-android:1.19.2")
+
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
@@ -61,9 +64,6 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
     implementation("androidx.compose.runtime:runtime-livedata")
-
-    // ONNX Runtime for on-device training (includes inference capabilities)
-    implementation("com.microsoft.onnxruntime:onnxruntime-training-android:1.17.3")
 
     // Firebase
     implementation(platform("com.google.firebase:firebase-bom:33.0.0"))

@@ -28,7 +28,6 @@ import com.google.firebase.database.FirebaseDatabase
 import com.google.firebase.database.ServerValue
 import com.google.firebase.database.ValueEventListener
 import kotlinx.coroutines.delay
-import java.text.SimpleDateFormat
 import java.util.*
 
 class MainActivity : ComponentActivity() {
@@ -42,7 +41,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        sharedPrefs = getSharedPreferences("AlphonsoPrefs", Context.MODE_PRIVATE)
+        sharedPrefs = getSharedPreferences("AlphonsoPrefs", MODE_PRIVATE)
         
         try {
             if (FirebaseApp.getApps(this).isEmpty()) {
@@ -61,7 +60,7 @@ class MainActivity : ComponentActivity() {
     
     @Composable
     fun MainScreen() {
-        var disableUntil by remember { mutableStateOf(0L) }
+        var disableUntil by remember { mutableLongStateOf(0L) }
         var timeRemaining by remember { mutableStateOf("") }
         val labelThresholds = remember { mutableStateMapOf<String, Float>() }
         var allowMobileData by remember { mutableStateOf(sharedPrefs.getBoolean("allowMobileDataBackup", false)) }
@@ -84,12 +83,14 @@ class MainActivity : ComponentActivity() {
 
                 configRef.child("labelThresholds").addValueEventListener(object : ValueEventListener {
                     override fun onDataChange(snapshot: DataSnapshot) {
-                        val remoteThresholds = snapshot.value as? Map<String, Any>
+                        val remoteThresholds = snapshot.value as? Map<*, *>
                         remoteThresholds?.let {
                             for ((label, value) in it) {
-                                val floatValue = (value as? Double)?.toFloat()
-                                if (floatValue != null) {
-                                    labelThresholds[label] = floatValue
+                                if (label is String) {
+                                    val floatValue = (value as? Double)?.toFloat()
+                                    if (floatValue != null) {
+                                        labelThresholds[label] = floatValue
+                                    }
                                 }
                             }
                         }
@@ -109,7 +110,7 @@ class MainActivity : ComponentActivity() {
                     val hours = diff / (1000 * 60 * 60)
                     val minutes = (diff % (1000 * 60 * 60)) / (1000 * 60)
                     val seconds = (diff % (1000 * 60)) / 1000
-                    timeRemaining = String.format("%02d:%02d:%02d", hours, minutes, seconds)
+                    timeRemaining = String.format(Locale.getDefault(), "%02d:%02d:%02d", hours, minutes, seconds)
                 } else {
                     timeRemaining = ""
                 }
@@ -143,12 +144,14 @@ class MainActivity : ComponentActivity() {
                          if (disableValue != null) {
                              disableUntil = disableValue
                          }
-                        val remoteThresholds = snapshot.child("labelThresholds").value as? Map<String, Any>
+                        val remoteThresholds = snapshot.child("labelThresholds").value as? Map<*, *>
                         remoteThresholds?.let {
                             for ((label, value) in it) {
-                                val floatValue = (value as? Double)?.toFloat()
-                                if (floatValue != null) {
-                                    labelThresholds[label] = floatValue
+                                if (label is String) {
+                                    val floatValue = (value as? Double)?.toFloat()
+                                    if (floatValue != null) {
+                                        labelThresholds[label] = floatValue
+                                    }
                                 }
                             }
                         }
@@ -188,7 +191,7 @@ class MainActivity : ComponentActivity() {
                 }
                 items(ConsciousnessAccessibilityService.SENSITIVE_LABELS.toList()) { label ->
                     val threshold = labelThresholds[label] ?: 0.75f
-                    Text(String.format("  %s: %.0f%%", label, threshold * 100))
+                    Text(String.format(Locale.getDefault(), "  %s: %.0f%%", label, threshold * 100))
                 }
             }
 
@@ -205,11 +208,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun enableDeviceAdmin() {
-        val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+        val dpm = getSystemService(DEVICE_POLICY_SERVICE) as DevicePolicyManager
         if (!dpm.isAdminActive(deviceAdminSample)) {
             val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
             intent.putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, deviceAdminSample)
-            intent.putExtra(DevicePolicy.EXTRA_ADD_EXPLANATION, "Enable Device Admin to protect your device.")
+            intent.putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION, "Enable Device Admin to protect your device.")
             startActivity(intent)
         } else {
             Toast.makeText(this, "Device Admin is already enabled.", Toast.LENGTH_SHORT).show()
