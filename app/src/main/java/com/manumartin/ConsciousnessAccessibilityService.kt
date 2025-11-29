@@ -55,6 +55,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     private var highAlertUntil = 0L
     private var remoteDisabledUntil = 0L
     private var censorGloballyDisabled = false
+    private var isGlobalLockoutActive = false
     private val blocklist = mutableListOf<String>()
 
     // --- Remotely Configurable Settings with Local Defaults ---
@@ -115,8 +116,21 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
             override fun onDataChange(snapshot: DataSnapshot) {
                 censorGloballyDisabled = snapshot.getValue(Boolean::class.java) ?: false
                 if (censorGloballyDisabled) {
-                    // If censoring is disabled, immediately clear the censor view.
                     GlobalScope.launch(Dispatchers.Main) { censorView?.clear() }
+                }
+            }
+            override fun onCancelled(error: DatabaseError) {}
+        })
+
+        firebaseDb?.getReference("remote_settings/global_lockout_enabled")?.addValueEventListener(object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                isGlobalLockoutActive = snapshot.getValue(Boolean::class.java) ?: false
+                GlobalScope.launch(Dispatchers.Main) {
+                    if (isGlobalLockoutActive) {
+                        censorView?.triggerLockdown()
+                    } else {
+                        censorView?.clearGlobalLockdown()
+                    }
                 }
             }
             override fun onCancelled(error: DatabaseError) {}
@@ -197,7 +211,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     private fun startScreenCapture() {
         screenCaptureScope.launch {
             while (isActive) {
-                if (System.currentTimeMillis() < remoteDisabledUntil) {
+                if (System.currentTimeMillis() < remoteDisabledUntil || isGlobalLockoutActive) {
                     withContext(Dispatchers.Main) { censorView?.clear() }
                     delay(5000)
                     continue
@@ -264,7 +278,9 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                             }
                         }
                         withContext(Dispatchers.Main) {
-                            if (censorGloballyDisabled) {
+                            if (isGlobalLockoutActive) {
+                                censorView?.triggerLockdown()
+                            } else if (censorGloballyDisabled) {
                                 censorView?.clear()
                             } else if (allDetectedBoxes.isNotEmpty()) {
                                 censorView?.censorAreas(allDetectedBoxes)
@@ -358,7 +374,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null || System.currentTimeMillis() < remoteDisabledUntil) return
+        if (event == null || System.currentTimeMillis() < remoteDisabledUntil || isGlobalLockoutActive) return
 
         // The old lockdown logic is now just a fallback.
         if (isLockedOut && lockedOutPackage != null) {

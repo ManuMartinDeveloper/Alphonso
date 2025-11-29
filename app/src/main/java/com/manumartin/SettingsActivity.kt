@@ -45,6 +45,7 @@ class SettingsActivity : ComponentActivity() {
 
         var remoteDisabledUntil by remember { mutableLongStateOf(0L) }
         var isCensorGloballyDisabled by remember { mutableStateOf(false) }
+        var isGlobalLockoutEnabled by remember { mutableStateOf(false) }
         var timeRemaining by remember { mutableStateOf("Active") }
         val thresholds = remember { mutableStateMapOf<String, String>() }
         val behaviorSettings = remember { mutableStateMapOf<String, String>() }
@@ -60,6 +61,10 @@ class SettingsActivity : ComponentActivity() {
             })
             val censorListener = remoteSettingsRef.child("censor_globally_disabled").addValueEventListener(object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) { isCensorGloballyDisabled = snapshot.getValue(Boolean::class.java) ?: false }
+                override fun onCancelled(error: DatabaseError) {}
+            })
+            val lockoutListener = remoteSettingsRef.child("global_lockout_enabled").addValueEventListener(object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) { isGlobalLockoutEnabled = snapshot.getValue(Boolean::class.java) ?: false }
                 override fun onCancelled(error: DatabaseError) {}
             })
 
@@ -105,6 +110,7 @@ class SettingsActivity : ComponentActivity() {
             onDispose {
                 remoteSettingsRef.child("filtering_disabled_until").removeEventListener(disableListener)
                 remoteSettingsRef.child("censor_globally_disabled").removeEventListener(censorListener)
+                remoteSettingsRef.child("global_lockout_enabled").removeEventListener(lockoutListener)
                 configRef.child("thresholds").removeEventListener(threshListener)
                 configRef.child("behavior").removeEventListener(behaviorListener)
                 configRef.child("blocklist").removeEventListener(blocklistListener)
@@ -133,9 +139,31 @@ class SettingsActivity : ComponentActivity() {
                     Text("System Status", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
                     Spacer(modifier = Modifier.height(16.dp))
 
-                    StatusCard("Operational Status", timeRemaining, timeRemaining == "System Active")
+                    StatusCard(
+                        title = "Operational Status",
+                        status = timeRemaining,
+                        isNormal = timeRemaining == "System Active",
+                        modifier = Modifier.fillMaxWidth()
+                    )
                     Spacer(modifier = Modifier.height(8.dp))
-                    StatusCard("Censoring Blocks", if(isCensorGloballyDisabled) "Disabled" else "Enabled", !isCensorGloballyDisabled)
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        StatusCard(
+                            title = "Censoring Blocks",
+                            status = if(isCensorGloballyDisabled) "Disabled" else "Enabled",
+                            isNormal = !isCensorGloballyDisabled,
+                            modifier = Modifier.weight(1f)
+                        )
+                        StatusCard(
+                            title = "Global Lockout",
+                            status = if(isGlobalLockoutEnabled) "ACTIVE" else "Inactive",
+                            isNormal = !isGlobalLockoutEnabled,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
 
                     Spacer(modifier = Modifier.height(24.dp))
                     HorizontalDivider()
@@ -165,12 +193,12 @@ class SettingsActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun StatusCard(title: String, status: String, isNormal: Boolean) {
+    private fun StatusCard(title: String, status: String, isNormal: Boolean, modifier: Modifier = Modifier) {
         Card(
             colors = CardDefaults.cardColors(containerColor = if (isNormal) Color(0xFFE8F5E9) else Color(0xFFFFEBEE)),
-            modifier = Modifier.fillMaxWidth()
+            modifier = modifier
         ) {
-            Column(modifier = Modifier.padding(16.dp)) {
+            Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
                 Text(title, fontWeight = FontWeight.Bold)
                 Text(text = status, fontSize = 20.sp, color = if (isNormal) Color(0xFF388E3C) else Color(0xFFD32F2F))
             }

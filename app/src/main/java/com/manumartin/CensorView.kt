@@ -11,7 +11,7 @@ class CensorView(context: Context) : View(context) {
 
     private val paint = Paint()
     private val blockedAreas = mutableListOf<Rect>()
-    private var isLockedDown = false
+    private var isGloballyLockedDown = false
 
     init {
         paint.color = Color.BLACK
@@ -21,7 +21,7 @@ class CensorView(context: Context) : View(context) {
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
-        if (isLockedDown) {
+        if (isGloballyLockedDown) {
             canvas.drawColor(Color.BLACK)
         } else {
             for (rect in blockedAreas) {
@@ -31,27 +31,37 @@ class CensorView(context: Context) : View(context) {
     }
 
     fun censorAreas(rects: List<Rect>) {
-        isLockedDown = false
         blockedAreas.clear()
         blockedAreas.addAll(rects)
-        if (rects.isNotEmpty()) {
+        if (rects.isNotEmpty() && !isGloballyLockedDown) {
             visibility = View.VISIBLE
             invalidate()
-        } else {
+        } else if (rects.isEmpty() && !isGloballyLockedDown) {
             visibility = View.GONE
         }
     }
 
     fun triggerLockdown() {
-        isLockedDown = true
-        blockedAreas.clear()
+        isGloballyLockedDown = true
         visibility = View.VISIBLE
         invalidate()
     }
 
+    fun clearGlobalLockdown() {
+        if (isGloballyLockedDown) {
+            isGloballyLockedDown = false
+            if (blockedAreas.isEmpty()) {
+                visibility = View.GONE
+            } else {
+                invalidate()
+            }
+        }
+    }
+
     fun clear() {
-        isLockedDown = false
         blockedAreas.clear()
-        visibility = View.GONE
+        if (!isGloballyLockedDown) {
+            visibility = View.GONE
+        }
     }
 }
