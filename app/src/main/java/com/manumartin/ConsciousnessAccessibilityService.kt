@@ -56,7 +56,24 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     private var remoteDisabledUntil = 0L
     private var censorGloballyDisabled = false
     private var isGlobalLockoutActive = false
-    private val blocklist = mutableListOf<String>()
+    
+    // --- VARIABLES TO ADD TO YOUR CLASS ---
+    
+    // 1. The list of bad words (Synced from Firebase, but defaults here)
+    private val defaultBlocklist = setOf(
+        "pornhub", "xvideos", "xnxx", "chaturbate", "redtube", 
+        "youporn", "xhamster", "brazzers", "adultfriendfinder", 
+        "nude", "porn", "sexy", "xxx", "hentai"
+    )
+    private val blocklist = mutableListOf<String>().apply { addAll(defaultBlocklist) }
+
+    // 2. Browsers where we specifically check the URL bar first (Optimization)
+    private val browserPackages = setOf(
+        "com.android.chrome", 
+        "org.mozilla.firefox", 
+        "com.duckduckgo.mobile.android",
+        "com.microsoft.emmx" // Edge
+    )
 
     // --- Remotely Configurable Settings with Local Defaults ---
     private var lockoutDurationMinutes = 3L
@@ -373,50 +390,119 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         }
     }
 
+    // --- MAIN EVENT LISTENER ---
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        // Basic checks: Is event null? Is remote disable active? Is lockdown active?
         if (event == null || System.currentTimeMillis() < remoteDisabledUntil || isGlobalLockoutActive) return
 
-        // The old lockdown logic is now just a fallback.
+        // If we are already locked out, enforce it and stop checking text
         if (isLockedOut && lockedOutPackage != null) {
-            val activePackage = rootInActiveWindow?.packageName?.toString()
-            if (activePackage == lockedOutPackage || event.packageName?.toString() == lockedOutPackage) {
+            if (event.packageName?.toString() == lockedOutPackage) {
                 performGlobalAction(GLOBAL_ACTION_HOME)
                 return
             }
         }
 
-        if (!isLockedOut && (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)) {
-            if (isCurrentlySpeaking) return
+        // MAIN LOGIC: Check for Bad Text
+        if (!isLockedOut) {
+            val packageName = event.packageName?.toString() ?: return
+            
+            // Strategy A: Targeted Browser Check (Fast & Accurate)
+            // If we are in a known browser, look specifically for the URL bar ID first.
+            if (browserPackages.contains(packageName)) {
+                 val rootNode = rootInActiveWindow ?: return
+                 val urlBarText = findUrlBarText(rootNode)
+                 
+                 // If we found a URL and it contains bad words -> BLOCK
+                 if (urlBarText != null && checkAndBlock(urlBarText, packageName)) {
+                     return 
+                 }
+            }
 
-            val rootNode = rootInActiveWindow ?: return
-            val currentPackageName = rootNode.packageName?.toString() ?: return
-
-            if (currentPackageName.contains("com.android.systemui")) return
-
-            val textContent = getAllTextFromNode(rootNode).joinToString(" ").lowercase()
-            if (textContent.isNotEmpty()) {
-                for (keyword in blocklist) {
-                    if (textContent.contains(keyword)) {
-                        Log.w(TAG, "Text-based block in app: $currentPackageName for keyword: $keyword")
-                        Toast.makeText(this, "Content blocked.", Toast.LENGTH_SHORT).show()
-                        performGlobalAction(GLOBAL_ACTION_HOME)
-                        inferenceScope.launch { logEvent(LogEventType.APP_BLOCKED, "Text-based block: $keyword", 1.0f) }
-                        return
-                    }
+            // Strategy B: Generic Screen Scan (Fallback)
+            // If it's not a browser OR if Strategy A didn't find anything, scan EVERYTHING.
+            // We skip SystemUI (status bar/notification shade) to prevent lag.
+            if (!packageName.contains("com.android.systemui")) {
+                val rootNode = rootInActiveWindow ?: return
+                
+                // Recursively get ALL text on the screen
+                val allText = getAllTextFromNode(rootNode).joinToString(" ").lowercase()
+                
+                if (allText.isNotEmpty()) {
+                    checkAndBlock(allText, packageName)
                 }
             }
         }
     }
 
+    // --- HELPER FUNCTIONS ---
 
+    /**
+     * Checks if the text contains any word from the blocklist.
+     * If yes: Logs it, Shows Toast, Presses BACK, and Presses HOME.
+     */
+    private fun checkAndBlock(text: String, packageName: String): Boolean {
+        val lowerText = text.lowercase()
+        for (keyword in blocklist) {
+            if (lowerText.contains(keyword)) {
+                Log.w(TAG, "BLOCKED TEXT: '$keyword' in $packageName")
+                
+                // 1. Notify User
+                Toast.makeText(this, "Restricted Content: $keyword", Toast.LENGTH_SHORT).show()
+                
+                // 2. Instant Action: Go Back (to close popup/tab) then Home (to minimize app)
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                performGlobalAction(GLOBAL_ACTION_HOME)
+                
+                // 3. Log to Database/Firebase
+                inferenceScope.launch { 
+                    logEvent(LogEventType.APP_BLOCKED, "Text Block: $keyword", 1.0f) 
+                }
+                
+                return true // Blocked successfully
+            }
+        }
+        return false
+    }
+
+    /**
+     * recursively traverses the Accessibility Node tree to extract all visible text.
+     */
     private fun getAllTextFromNode(node: AccessibilityNodeInfo?): List<String> {
         if (node == null) return emptyList()
         val textList = mutableListOf<String>()
+        
+        // Grab text or content description (often used for images/buttons)
         node.text?.let { textList.add(it.toString()) }
+        node.contentDescription?.let { textList.add(it.toString()) }
+        
+        // Recursively check children
         for (i in 0 until node.childCount) {
             textList.addAll(getAllTextFromNode(node.getChild(i)))
         }
         return textList
+    }
+
+    /**
+     * Optimization: Looks for specific View IDs known to be URL bars in major browsers.
+     */
+    private fun findUrlBarText(nodeInfo: AccessibilityNodeInfo): String? {
+        val browserUrlBarIds = listOf(
+            "com.android.chrome:id/url_bar",
+            "org.mozilla.firefox:id/url_bar_title",
+            "com.duckduckgo.mobile.android:id/omnibarTextInput",
+            "com.microsoft.emmx:id/url_bar"
+        )
+        
+        for (id in browserUrlBarIds) {
+            // This is very fast compared to scanning the whole tree
+            val nodes = nodeInfo.findAccessibilityNodeInfosByViewId(id)
+            if (nodes != null && nodes.isNotEmpty()) {
+                return nodes[0].text?.toString()
+            }
+        }
+        return null
     }
 
     private fun speakPrayer() {
