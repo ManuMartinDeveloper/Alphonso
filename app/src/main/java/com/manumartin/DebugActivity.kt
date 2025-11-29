@@ -57,39 +57,12 @@ class DebugActivity : ComponentActivity() {
             val logs = remember { mutableStateOf<List<EventLogEntity>>(emptyList()) }
             val selectedFilters = remember { mutableStateOf(emptySet<LogEventType>()) }
 
-            var serviceDisabledUntil by remember { mutableStateOf(0L) }
-            var isCensorGloballyDisabled by remember { mutableStateOf(false) }
-            var currentTime by remember { mutableStateOf(System.currentTimeMillis()) }
-
-            LaunchedEffect(Unit) {
-                while(true) {
-                    delay(1000) // update every second
-                    currentTime = System.currentTimeMillis()
-                }
-            }
-
             val workManager = WorkManager.getInstance(applicationContext)
             val workInfo by workManager.getWorkInfosForUniqueWorkLiveData("NightlyBatchWork").observeAsState()
 
             val currentWorkInfo = workInfo?.firstOrNull()
             val trainingState = currentWorkInfo?.state
             val trainingProgress = currentWorkInfo?.progress?.getString("KEY_PROGRESS")
-
-            LaunchedEffect(Unit) {
-                database.getReference("remote_settings/filtering_disabled_until").addValueEventListener(object: ValueEventListener {
-                    override fun onDataChange(snapshot: DataSnapshot) {
-                        serviceDisabledUntil = snapshot.getValue(Long::class.java) ?: 0L
-                    }
-                    override fun onCancelled(error: DatabaseError) {}
-                })
-
-                database.getReference("remote_settings/censor_globally_disabled").addValueEventListener(object: ValueEventListener {
-                    override fun onDataChange(snapshot: DataSnapshot) {
-                        isCensorGloballyDisabled = snapshot.getValue(Boolean::class.java) ?: false
-                    }
-                    override fun onCancelled(error: DatabaseError) {}
-                })
-            }
 
             fun refreshLogs() {
                 activityScope.launch {
@@ -142,21 +115,7 @@ class DebugActivity : ComponentActivity() {
                     // Manual trigger logic would go here
                 },
                 trainingState = trainingState,
-                trainingProgress = trainingProgress,
-                serviceDisabledUntil = serviceDisabledUntil,
-                currentTime = currentTime,
-                isCensorGloballyDisabled = isCensorGloballyDisabled,
-                onRequestServiceDisable = {
-                    val disableForMillis = 3600 * 1000L // 1 hour
-                    val newDisabledUntil = System.currentTimeMillis() + disableForMillis
-                    database.getReference("remote_settings/filtering_disabled_until").setValue(newDisabledUntil)
-                },
-                onUndoServiceDisable = {
-                    database.getReference("remote_settings/filtering_disabled_until").setValue(0L)
-                },
-                onToggleCensoring = { enabled ->
-                    database.getReference("remote_settings/censor_globally_disabled").setValue(enabled)
-                }
+                trainingProgress = trainingProgress
             )
         }
     }
@@ -172,13 +131,7 @@ fun DebugScreen(
     onUndoFalsePositive: (Int) -> Unit,
     onRetrain: () -> Unit,
     trainingState: WorkInfo.State?,
-    trainingProgress: String?,
-    serviceDisabledUntil: Long,
-    currentTime: Long,
-    isCensorGloballyDisabled: Boolean,
-    onRequestServiceDisable: () -> Unit,
-    onUndoServiceDisable: () -> Unit,
-    onToggleCensoring: (Boolean) -> Unit
+    trainingProgress: String?
 ) {
     val context = LocalContext.current
 
@@ -213,15 +166,6 @@ fun DebugScreen(
             Text(progressText, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp), fontSize = 12.sp)
         }
 
-        SystemStatusSection(
-            serviceDisabledUntil = serviceDisabledUntil,
-            currentTime = currentTime,
-            isCensorGloballyDisabled = isCensorGloballyDisabled,
-            onRequestServiceDisable = onRequestServiceDisable,
-            onUndoServiceDisable = onUndoServiceDisable,
-            onToggleCensoring = onToggleCensoring
-        )
-
         LazyRow(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
             items(LogEventType.values()) { type ->
                 FilterChip(
@@ -240,78 +184,6 @@ fun DebugScreen(
         LazyColumn(modifier = Modifier.weight(1f)) {
             items(eventLog) { log ->
                 EventLogItem(log, onFlagFalsePositive, onUndoFalsePositive)
-            }
-        }
-    }
-}
-
-@Composable
-fun SystemStatusSection(
-    serviceDisabledUntil: Long,
-    currentTime: Long,
-    isCensorGloballyDisabled: Boolean,
-    onRequestServiceDisable: () -> Unit,
-    onUndoServiceDisable: () -> Unit,
-    onToggleCensoring: (Boolean) -> Unit
-) {
-    val isServiceDisabled = serviceDisabledUntil > currentTime
-    val remainingSeconds = if (isServiceDisabled) (serviceDisabledUntil - currentTime) / 1000 else 0
-    val remainingMinutes = remainingSeconds / 60
-    val remainingHours = remainingMinutes / 60
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(8.dp)
-            .background(MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.medium)
-            .padding(12.dp)
-    ) {
-        Text("System Status", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // Service Status
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column {
-                Text("Filtering Service")
-                val statusText = if (isServiceDisabled) {
-                    "Disabled (expires in ~${if (remainingHours > 0) "$remainingHours h " else ""}${remainingMinutes % 60} m)"
-                } else {
-                    "Enabled"
-                }
-                Text(statusText, style = MaterialTheme.typography.bodySmall, color = if (isServiceDisabled) MaterialTheme.colorScheme.error else Color.Green)
-            }
-            if (isServiceDisabled) {
-                Button(onClick = onUndoServiceDisable) {
-                    Text("Re-enable")
-                }
-            } else {
-                Button(onClick = onRequestServiceDisable) {
-                    Text("1-Hour Pause")
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-        Divider()
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // Censoring Status
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column {
-                Text("Censoring Overlay")
-                val statusText = if (isCensorGloballyDisabled) "Disabled" else "Enabled"
-                Text(statusText, style = MaterialTheme.typography.bodySmall, color = if (isCensorGloballyDisabled) MaterialTheme.colorScheme.error else Color.Green)
-            }
-            Button(onClick = { onToggleCensoring(!isCensorGloballyDisabled) }) {
-                Text(if (isCensorGloballyDisabled) "Enable" else "Disable")
             }
         }
     }
