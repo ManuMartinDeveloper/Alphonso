@@ -5,9 +5,14 @@ import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -37,47 +42,44 @@ class SettingsActivity : ComponentActivity() {
     @Composable
     fun SettingsScreen() {
         val context = LocalContext.current
-        val prefs = context.getSharedPreferences("AlphonsoPrefs", Context.MODE_PRIVATE)
 
-        var censorEnabled by remember { mutableStateOf(prefs.getBoolean("censor_view_enabled", true)) }
         var remoteDisabledUntil by remember { mutableLongStateOf(0L) }
+        var isCensorGloballyDisabled by remember { mutableStateOf(false) }
         var timeRemaining by remember { mutableStateOf("Active") }
         val thresholds = remember { mutableStateMapOf<String, String>() }
         val behaviorSettings = remember { mutableStateMapOf<String, String>() }
+        val blocklist = remember { mutableStateListOf<String>() }
 
         DisposableEffect(Unit) {
             val db = FirebaseDatabase.getInstance("https://alphonso-c7f69-default-rtdb.asia-southeast1.firebasedatabase.app")
 
-            val disableRef = db.getReference("remote_settings/filtering_disabled_until")
-            val disableListener = disableRef.addValueEventListener(object : ValueEventListener {
-                override fun onDataChange(snapshot: DataSnapshot) {
-                    remoteDisabledUntil = snapshot.getValue(Long::class.java) ?: 0L
-                }
+            val remoteSettingsRef = db.getReference("remote_settings")
+            val disableListener = remoteSettingsRef.child("filtering_disabled_until").addValueEventListener(object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) { remoteDisabledUntil = snapshot.getValue(Long::class.java) ?: 0L }
+                override fun onCancelled(error: DatabaseError) {}
+            })
+            val censorListener = remoteSettingsRef.child("censor_globally_disabled").addValueEventListener(object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) { isCensorGloballyDisabled = snapshot.getValue(Boolean::class.java) ?: false }
                 override fun onCancelled(error: DatabaseError) {}
             })
 
-            val threshRef = db.getReference("config/thresholds")
-            val threshListener = threshRef.addValueEventListener(object : ValueEventListener {
+            val configRef = db.getReference("config")
+            val threshListener = configRef.child("thresholds").addValueEventListener(object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
                     thresholds.clear()
                     snapshot.children.forEach { child ->
                         val labelName = child.key
                         val rawValue = child.value
                         val value = when (rawValue) {
-                            is Long -> rawValue.toFloat()
-                            is Double -> rawValue.toFloat()
-                            else -> null
+                            is Long -> rawValue.toFloat(); is Double -> rawValue.toFloat(); else -> null
                         }
-                        if (labelName != null && value != null) {
-                            thresholds[labelName] = "${(value * 100).toInt()}%"
-                        }
+                        if (labelName != null && value != null) { thresholds[labelName] = "${(value * 100).toInt()}%" }
                     }
                 }
                 override fun onCancelled(error: DatabaseError) {}
             })
 
-            val behaviorRef = db.getReference("config/behavior")
-            val behaviorListener = behaviorRef.addValueEventListener(object : ValueEventListener {
+            val behaviorListener = configRef.child("behavior").addValueEventListener(object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
                     behaviorSettings.clear()
                     snapshot.child("lockoutDurationMinutes").getValue(Long::class.java)?.let { behaviorSettings["Lockout Duration"] = "$it minutes" }
@@ -90,10 +92,22 @@ class SettingsActivity : ComponentActivity() {
                 override fun onCancelled(error: DatabaseError) {}
             })
 
+            val blocklistListener = configRef.child("blocklist").addValueEventListener(object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) {
+                    blocklist.clear()
+                    snapshot.children.forEach { child ->
+                        child.getValue(String::class.java)?.let { blocklist.add(it) }
+                    }
+                }
+                override fun onCancelled(error: DatabaseError) {}
+            })
+
             onDispose {
-                disableRef.removeEventListener(disableListener)
-                threshRef.removeEventListener(threshListener)
-                behaviorRef.removeEventListener(behaviorListener)
+                remoteSettingsRef.child("filtering_disabled_until").removeEventListener(disableListener)
+                remoteSettingsRef.child("censor_globally_disabled").removeEventListener(censorListener)
+                configRef.child("thresholds").removeEventListener(threshListener)
+                configRef.child("behavior").removeEventListener(behaviorListener)
+                configRef.child("blocklist").removeEventListener(blocklistListener)
             }
         }
 
@@ -104,8 +118,7 @@ class SettingsActivity : ComponentActivity() {
                     val diff = remoteDisabledUntil - now
                     val hours = TimeUnit.MILLISECONDS.toHours(diff)
                     val minutes = TimeUnit.MILLISECONDS.toMinutes(diff) % 60
-                    val seconds = TimeUnit.MILLISECONDS.toSeconds(diff) % 60
-                    timeRemaining = String.format("Paused: %02d:%02d:%02d", hours, minutes, seconds)
+                    timeRemaining = String.format("Paused (resumes in %d hr, %d min)", hours, minutes)
                 } else {
                     timeRemaining = "System Active"
                 }
@@ -113,66 +126,30 @@ class SettingsActivity : ComponentActivity() {
             }
         }
 
-        Scaffold(
-            topBar = { }
-        ) { padding ->
+        Scaffold(topBar = { }) { padding ->
             LazyColumn(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp)) {
 
                 item {
                     Text("System Status", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
                     Spacer(modifier = Modifier.height(16.dp))
 
-                    Card(
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (timeRemaining == "System Active") Color(0xFFE8F5E9) else Color(0xFFFFEBEE)
-                        ),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Text("Operational Status", fontWeight = FontWeight.Bold)
-                            Text(text = timeRemaining, fontSize = 20.sp, color = if (timeRemaining == "System Active") Color(0xFF4CAF50) else Color(0xFFF44336))
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(24.dp))
-                    HorizontalDivider()
-                    Spacer(modifier = Modifier.height(24.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Global Lockdown Blackout", fontWeight = FontWeight.Bold)
-                            Text("Black out entire screen on 5th strike.", fontSize = 12.sp, color = Color.Gray)
-                        }
-                        Switch(
-                            checked = censorEnabled,
-                            onCheckedChange = {
-                                censorEnabled = it
-                                prefs.edit().putBoolean("censor_view_enabled", it).apply()
-                                Toast.makeText(context, "Restart Service to apply", Toast.LENGTH_SHORT).show()
-                            }
-                        )
-                    }
+                    StatusCard("Operational Status", timeRemaining, timeRemaining == "System Active")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    StatusCard("Censoring Blocks", if(isCensorGloballyDisabled) "Disabled" else "Enabled", !isCensorGloballyDisabled)
 
                     Spacer(modifier = Modifier.height(24.dp))
                     HorizontalDivider()
                     Spacer(modifier = Modifier.height(8.dp))
                 }
 
+                item { BlocklistSection(blocklist.sorted()) }
+                item { Spacer(modifier = Modifier.height(24.dp)); HorizontalDivider(); Spacer(modifier = Modifier.height(8.dp)) }
+
                 item {
                     Text("Remote Behavior (Read-Only)", fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 8.dp))
                 }
                 items(behaviorSettings.toList().sortedBy { it.first }) { (label, value) ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(label, fontSize = 14.sp)
-                        Text(value, fontSize = 14.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start=8.dp))
-                    }
+                    SettingsRow(label, value)
                 }
                 
                 item { Spacer(modifier = Modifier.height(24.dp)); HorizontalDivider(); Spacer(modifier = Modifier.height(8.dp)) }
@@ -181,12 +158,71 @@ class SettingsActivity : ComponentActivity() {
                     Text("Remote Sensitivity (Read-Only)", fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 8.dp))
                 }
                 items(thresholds.toList().sortedBy { it.first }) { (label, value) ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(label, fontSize = 14.sp)
-                        Text(value, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    SettingsRow(label, value)
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun StatusCard(title: String, status: String, isNormal: Boolean) {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = if (isNormal) Color(0xFFE8F5E9) else Color(0xFFFFEBEE)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(title, fontWeight = FontWeight.Bold)
+                Text(text = status, fontSize = 20.sp, color = if (isNormal) Color(0xFF388E3C) else Color(0xFFD32F2F))
+            }
+        }
+    }
+
+    @Composable
+    private fun SettingsRow(label: String, value: String) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(label, fontSize = 14.sp)
+            Text(value, fontSize = 14.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start=8.dp))
+        }
+    }
+
+    @Composable
+    fun BlocklistSection(blocklist: List<String>) {
+        var isExpanded by remember { mutableStateOf(false) }
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.surface, shape = MaterialTheme.shapes.medium)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { isExpanded = !isExpanded }
+                    .padding(vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Keyword Blocklist (${blocklist.size} items)", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyLarge)
+                Icon(
+                    imageVector = Icons.Default.ArrowDropDown,
+                    contentDescription = if (isExpanded) "Collapse" else "Expand"
+                )
+            }
+
+            AnimatedVisibility(visible = isExpanded) {
+                Column(modifier = Modifier.padding(horizontal = 12.dp)) {
+                    if (blocklist.isEmpty()) {
+                        Text("No keywords in blocklist.", modifier = Modifier.padding(vertical = 8.dp), style = MaterialTheme.typography.bodyMedium)
+                    } else {
+                        LazyColumn(modifier = Modifier.heightIn(max = 200.dp)) {
+                            items(blocklist) { keyword ->
+                                Text(text = keyword, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp))
+                                HorizontalDivider()
+                            }
+                        }
                     }
                 }
             }

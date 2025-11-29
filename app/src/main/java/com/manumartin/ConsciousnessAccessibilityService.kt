@@ -43,7 +43,6 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     private var ortSession: OrtSession? = null
     private lateinit var eventLogDao: EventLogDao
     private var firebaseDb: FirebaseDatabase? = null
-    private lateinit var prefs: SharedPreferences
     private lateinit var dpm: DevicePolicyManager
     private lateinit var adminComponent: ComponentName
 
@@ -55,6 +54,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     private var lockedOutPackage: String? = null
     private var highAlertUntil = 0L
     private var remoteDisabledUntil = 0L
+    private var censorGloballyDisabled = false
     private val blocklist = mutableListOf<String>()
 
     // --- Remotely Configurable Settings with Local Defaults ---
@@ -90,7 +90,6 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     override fun onServiceConnected() {
         super.onServiceConnected()
         Log.i(TAG, ">>> SERVICE STARTED <<<")
-        prefs = getSharedPreferences("AlphonsoPrefs", MODE_PRIVATE)
         tts = TextToSpeech(this, this)
         dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
         adminComponent = ComponentName(this, DeviceAdminReceiver::class.java)
@@ -111,6 +110,18 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
             override fun onDataChange(snapshot: DataSnapshot) { remoteDisabledUntil = snapshot.getValue(Long::class.java) ?: 0L }
             override fun onCancelled(error: DatabaseError) {}
         })
+
+        firebaseDb?.getReference("remote_settings/censor_globally_disabled")?.addValueEventListener(object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                censorGloballyDisabled = snapshot.getValue(Boolean::class.java) ?: false
+                if (censorGloballyDisabled) {
+                    // If censoring is disabled, immediately clear the censor view.
+                    GlobalScope.launch(Dispatchers.Main) { censorView?.clear() }
+                }
+            }
+            override fun onCancelled(error: DatabaseError) {}
+        })
+
 
         firebaseDb?.getReference("config/thresholds")?.addValueEventListener(object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
@@ -204,7 +215,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                     }
                     override fun onFailure(errorCode: Int) {}
                 })
-                
+
                 val delayTime = if (System.currentTimeMillis() < highAlertUntil) scanDelayAlert else scanDelayNormal
                 delay(delayTime)
             }
@@ -253,13 +264,18 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                             }
                         }
                         withContext(Dispatchers.Main) {
-                            if (allDetectedBoxes.isNotEmpty()) {
+                            if (censorGloballyDisabled) {
+                                censorView?.clear()
+                            } else if (allDetectedBoxes.isNotEmpty()) {
                                 censorView?.censorAreas(allDetectedBoxes)
+                            } else {
+                                censorView?.clear()
+                            }
+
+                            if (allDetectedBoxes.isNotEmpty()) {
                                 highConfidenceTrigger?.let { handleDetections(it.first, it.second) } ?: bestCandidate?.let {
                                     inferenceScope.launch { logEvent(LogEventType.AI_CANDIDATE, "Candidate: ${it.first}", it.second) }
                                 }
-                            } else {
-                                censorView?.clear()
                             }
                         }
                     }
@@ -289,7 +305,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         if (currentPackage != lastStrikePackage || (now - lastStrikeTime > strikeResetWindowMs)) {
             strikeCount = 0
         }
-        
+
         strikeCount++
         lastStrikeTime = now
         lastStrikePackage = currentPackage
@@ -342,7 +358,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null) return
+        if (event == null || System.currentTimeMillis() < remoteDisabledUntil) return
 
         // The old lockdown logic is now just a fallback.
         if (isLockedOut && lockedOutPackage != null) {
@@ -354,8 +370,8 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         }
 
         if (!isLockedOut && (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)) {
-            if (isCurrentlySpeaking || System.currentTimeMillis() < remoteDisabledUntil) return
-            
+            if (isCurrentlySpeaking) return
+
             val rootNode = rootInActiveWindow ?: return
             val currentPackageName = rootNode.packageName?.toString() ?: return
 

@@ -4,15 +4,11 @@ import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.livedata.observeAsState
@@ -32,6 +28,7 @@ import com.google.firebase.database.FirebaseDatabase
 import com.google.firebase.database.ValueEventListener
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -59,7 +56,17 @@ class DebugActivity : ComponentActivity() {
         setContent {
             val logs = remember { mutableStateOf<List<EventLogEntity>>(emptyList()) }
             val selectedFilters = remember { mutableStateOf(emptySet<LogEventType>()) }
-            val blocklist = remember { mutableStateOf<List<String>>(emptyList()) }
+
+            var serviceDisabledUntil by remember { mutableStateOf(0L) }
+            var isCensorGloballyDisabled by remember { mutableStateOf(false) }
+            var currentTime by remember { mutableStateOf(System.currentTimeMillis()) }
+
+            LaunchedEffect(Unit) {
+                while(true) {
+                    delay(1000) // update every second
+                    currentTime = System.currentTimeMillis()
+                }
+            }
 
             val workManager = WorkManager.getInstance(applicationContext)
             val workInfo by workManager.getWorkInfosForUniqueWorkLiveData("NightlyBatchWork").observeAsState()
@@ -68,6 +75,22 @@ class DebugActivity : ComponentActivity() {
             val trainingState = currentWorkInfo?.state
             val trainingProgress = currentWorkInfo?.progress?.getString("KEY_PROGRESS")
 
+            LaunchedEffect(Unit) {
+                database.getReference("remote_settings/filtering_disabled_until").addValueEventListener(object: ValueEventListener {
+                    override fun onDataChange(snapshot: DataSnapshot) {
+                        serviceDisabledUntil = snapshot.getValue(Long::class.java) ?: 0L
+                    }
+                    override fun onCancelled(error: DatabaseError) {}
+                })
+
+                database.getReference("remote_settings/censor_globally_disabled").addValueEventListener(object: ValueEventListener {
+                    override fun onDataChange(snapshot: DataSnapshot) {
+                        isCensorGloballyDisabled = snapshot.getValue(Boolean::class.java) ?: false
+                    }
+                    override fun onCancelled(error: DatabaseError) {}
+                })
+            }
+
             fun refreshLogs() {
                 activityScope.launch {
                     val allLogs = withContext(Dispatchers.IO) { eventLogDao.getAll() }
@@ -75,25 +98,11 @@ class DebugActivity : ComponentActivity() {
                 }
             }
 
-            fun fetchBlocklist() {
-                database.getReference("config/blocklist").addListenerForSingleValueEvent(object : ValueEventListener {
-                    override fun onDataChange(snapshot: DataSnapshot) {
-                        val list = mutableListOf<String>()
-                        snapshot.children.forEach { child ->
-                            child.getValue(String::class.java)?.let { list.add(it) }
-                        }
-                        blocklist.value = list
-                    }
-                    override fun onCancelled(error: DatabaseError) {}
-                })
-            }
-
             LaunchedEffect(Unit, trainingState) {
                 if (trainingState == WorkInfo.State.SUCCEEDED) {
                     refreshLogs()
                 }
                 refreshLogs()
-                fetchBlocklist()
             }
 
             val filteredLogs = if (selectedFilters.value.isEmpty()) {
@@ -134,7 +143,20 @@ class DebugActivity : ComponentActivity() {
                 },
                 trainingState = trainingState,
                 trainingProgress = trainingProgress,
-                blocklist = blocklist.value
+                serviceDisabledUntil = serviceDisabledUntil,
+                currentTime = currentTime,
+                isCensorGloballyDisabled = isCensorGloballyDisabled,
+                onRequestServiceDisable = {
+                    val disableForMillis = 3600 * 1000L // 1 hour
+                    val newDisabledUntil = System.currentTimeMillis() + disableForMillis
+                    database.getReference("remote_settings/filtering_disabled_until").setValue(newDisabledUntil)
+                },
+                onUndoServiceDisable = {
+                    database.getReference("remote_settings/filtering_disabled_until").setValue(0L)
+                },
+                onToggleCensoring = { enabled ->
+                    database.getReference("remote_settings/censor_globally_disabled").setValue(enabled)
+                }
             )
         }
     }
@@ -151,7 +173,12 @@ fun DebugScreen(
     onRetrain: () -> Unit,
     trainingState: WorkInfo.State?,
     trainingProgress: String?,
-    blocklist: List<String>
+    serviceDisabledUntil: Long,
+    currentTime: Long,
+    isCensorGloballyDisabled: Boolean,
+    onRequestServiceDisable: () -> Unit,
+    onUndoServiceDisable: () -> Unit,
+    onToggleCensoring: (Boolean) -> Unit
 ) {
     val context = LocalContext.current
 
@@ -186,6 +213,15 @@ fun DebugScreen(
             Text(progressText, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp), fontSize = 12.sp)
         }
 
+        SystemStatusSection(
+            serviceDisabledUntil = serviceDisabledUntil,
+            currentTime = currentTime,
+            isCensorGloballyDisabled = isCensorGloballyDisabled,
+            onRequestServiceDisable = onRequestServiceDisable,
+            onUndoServiceDisable = onUndoServiceDisable,
+            onToggleCensoring = onToggleCensoring
+        )
+
         LazyRow(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
             items(LogEventType.values()) { type ->
                 FilterChip(
@@ -201,8 +237,6 @@ fun DebugScreen(
             }
         }
 
-        BlocklistSection(blocklist = blocklist)
-
         LazyColumn(modifier = Modifier.weight(1f)) {
             items(eventLog) { log ->
                 EventLogItem(log, onFlagFalsePositive, onUndoFalsePositive)
@@ -212,57 +246,76 @@ fun DebugScreen(
 }
 
 @Composable
-fun BlocklistSection(blocklist: List<String>) {
-    var isExpanded by remember { mutableStateOf(false) }
+fun SystemStatusSection(
+    serviceDisabledUntil: Long,
+    currentTime: Long,
+    isCensorGloballyDisabled: Boolean,
+    onRequestServiceDisable: () -> Unit,
+    onUndoServiceDisable: () -> Unit,
+    onToggleCensoring: (Boolean) -> Unit
+) {
+    val isServiceDisabled = serviceDisabledUntil > currentTime
+    val remainingSeconds = if (isServiceDisabled) (serviceDisabledUntil - currentTime) / 1000 else 0
+    val remainingMinutes = remainingSeconds / 60
+    val remainingHours = remainingMinutes / 60
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(8.dp)
             .background(MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.medium)
+            .padding(12.dp)
     ) {
+        Text("System Status", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Service Status
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { isExpanded = !isExpanded }
-                .padding(12.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier.fillMaxWidth()
         ) {
-            Text("Current Blocklist (${blocklist.size} keywords)", fontWeight = FontWeight.Bold)
-            Icon(
-                imageVector = Icons.Default.ArrowDropDown,
-                contentDescription = if (isExpanded) "Collapse" else "Expand"
-            )
+            Column {
+                Text("Filtering Service")
+                val statusText = if (isServiceDisabled) {
+                    "Disabled (expires in ~${if (remainingHours > 0) "$remainingHours h " else ""}${remainingMinutes % 60} m)"
+                } else {
+                    "Enabled"
+                }
+                Text(statusText, style = MaterialTheme.typography.bodySmall, color = if (isServiceDisabled) MaterialTheme.colorScheme.error else Color.Green)
+            }
+            if (isServiceDisabled) {
+                Button(onClick = onUndoServiceDisable) {
+                    Text("Re-enable")
+                }
+            } else {
+                Button(onClick = onRequestServiceDisable) {
+                    Text("1-Hour Pause")
+                }
+            }
         }
 
-        AnimatedVisibility(visible = isExpanded) {
-            Column(modifier = Modifier.padding(horizontal = 12.dp)) {
-                Divider(modifier = Modifier.padding(bottom = 4.dp))
-                if (blocklist.isEmpty()) {
-                    Text(
-                        "No keywords in blocklist.",
-                        modifier = Modifier.padding(vertical = 8.dp),
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                } else {
-                    LazyColumn(modifier = Modifier.heightIn(max = 200.dp)) {
-                        items(blocklist) { keyword ->
-                            Text(
-                                text = keyword,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 8.dp)
-                            )
-                            Divider()
-                        }
-                    }
-                }
+        Spacer(modifier = Modifier.height(8.dp))
+        Divider()
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Censoring Status
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column {
+                Text("Censoring Overlay")
+                val statusText = if (isCensorGloballyDisabled) "Disabled" else "Enabled"
+                Text(statusText, style = MaterialTheme.typography.bodySmall, color = if (isCensorGloballyDisabled) MaterialTheme.colorScheme.error else Color.Green)
+            }
+            Button(onClick = { onToggleCensoring(!isCensorGloballyDisabled) }) {
+                Text(if (isCensorGloballyDisabled) "Enable" else "Disable")
             }
         }
     }
 }
-
 
 @Composable
 fun EventLogItem(
