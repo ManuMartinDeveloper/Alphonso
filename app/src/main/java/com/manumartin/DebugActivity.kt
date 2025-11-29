@@ -4,11 +4,15 @@ import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.livedata.observeAsState
@@ -22,7 +26,10 @@ import androidx.compose.ui.unit.sp
 import androidx.room.Room
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import com.google.firebase.database.DataSnapshot
+import com.google.firebase.database.DatabaseError
 import com.google.firebase.database.FirebaseDatabase
+import com.google.firebase.database.ValueEventListener
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -52,6 +59,7 @@ class DebugActivity : ComponentActivity() {
         setContent {
             val logs = remember { mutableStateOf<List<EventLogEntity>>(emptyList()) }
             val selectedFilters = remember { mutableStateOf(emptySet<LogEventType>()) }
+            val blocklist = remember { mutableStateOf<List<String>>(emptyList()) }
 
             val workManager = WorkManager.getInstance(applicationContext)
             val workInfo by workManager.getWorkInfosForUniqueWorkLiveData("NightlyBatchWork").observeAsState()
@@ -67,11 +75,25 @@ class DebugActivity : ComponentActivity() {
                 }
             }
 
+            fun fetchBlocklist() {
+                database.getReference("config/blocklist").addListenerForSingleValueEvent(object : ValueEventListener {
+                    override fun onDataChange(snapshot: DataSnapshot) {
+                        val list = mutableListOf<String>()
+                        snapshot.children.forEach { child ->
+                            child.getValue(String::class.java)?.let { list.add(it) }
+                        }
+                        blocklist.value = list
+                    }
+                    override fun onCancelled(error: DatabaseError) {}
+                })
+            }
+
             LaunchedEffect(Unit, trainingState) {
                 if (trainingState == WorkInfo.State.SUCCEEDED) {
                     refreshLogs()
                 }
                 refreshLogs()
+                fetchBlocklist()
             }
 
             val filteredLogs = if (selectedFilters.value.isEmpty()) {
@@ -111,7 +133,8 @@ class DebugActivity : ComponentActivity() {
                     // Manual trigger logic would go here
                 },
                 trainingState = trainingState,
-                trainingProgress = trainingProgress
+                trainingProgress = trainingProgress,
+                blocklist = blocklist.value
             )
         }
     }
@@ -127,7 +150,8 @@ fun DebugScreen(
     onUndoFalsePositive: (Int) -> Unit,
     onRetrain: () -> Unit,
     trainingState: WorkInfo.State?,
-    trainingProgress: String?
+    trainingProgress: String?,
+    blocklist: List<String>
 ) {
     val context = LocalContext.current
 
@@ -177,6 +201,8 @@ fun DebugScreen(
             }
         }
 
+        BlocklistSection(blocklist = blocklist)
+
         LazyColumn(modifier = Modifier.weight(1f)) {
             items(eventLog) { log ->
                 EventLogItem(log, onFlagFalsePositive, onUndoFalsePositive)
@@ -184,6 +210,59 @@ fun DebugScreen(
         }
     }
 }
+
+@Composable
+fun BlocklistSection(blocklist: List<String>) {
+    var isExpanded by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(8.dp)
+            .background(MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.medium)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { isExpanded = !isExpanded }
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("Current Blocklist (${blocklist.size} keywords)", fontWeight = FontWeight.Bold)
+            Icon(
+                imageVector = Icons.Default.ArrowDropDown,
+                contentDescription = if (isExpanded) "Collapse" else "Expand"
+            )
+        }
+
+        AnimatedVisibility(visible = isExpanded) {
+            Column(modifier = Modifier.padding(horizontal = 12.dp)) {
+                Divider(modifier = Modifier.padding(bottom = 4.dp))
+                if (blocklist.isEmpty()) {
+                    Text(
+                        "No keywords in blocklist.",
+                        modifier = Modifier.padding(vertical = 8.dp),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                } else {
+                    LazyColumn(modifier = Modifier.heightIn(max = 200.dp)) {
+                        items(blocklist) { keyword ->
+                            Text(
+                                text = keyword,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 8.dp)
+                            )
+                            Divider()
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 
 @Composable
 fun EventLogItem(
@@ -196,8 +275,9 @@ fun EventLogItem(
 
     val color = when {
         log.isFalsePositive -> Color.Yellow.copy(alpha=0.4f)
-        eventType == LogEventType.DETECTION -> Color.Red.copy(alpha=0.1f)
-        eventType == LogEventType.WARNING -> Color(0xFFFFA500).copy(alpha=0.2f)
+        eventType == LogEventType.AI_CANDIDATE -> Color.Cyan.copy(alpha=0.15f)
+        eventType == LogEventType.WARNING -> Color.Yellow.copy(alpha=0.2f)
+        eventType == LogEventType.APP_BLOCKED -> Color.Red.copy(alpha=0.3f)
         else -> Color.Transparent
     }
 
@@ -216,7 +296,7 @@ fun EventLogItem(
                 Text(
                     text = "Confidence: ${(log.confidenceScore * 100).toInt()}%",
                     fontSize = 12.sp,
-                    color = Color.Magenta,
+                    color = if(log.confidenceScore > 0.5) Color.Magenta else Color.Gray,
                     fontWeight = FontWeight.Bold
                 )
             }
@@ -225,7 +305,7 @@ fun EventLogItem(
         }
 
         // *** LOGIC TO SHOW/HIDE BUTTONS ***
-        if (eventType == LogEventType.DETECTION || eventType == LogEventType.WARNING || eventType == LogEventType.APP_BLOCKED) {
+        if (eventType == LogEventType.AI_CANDIDATE || eventType == LogEventType.WARNING || eventType == LogEventType.APP_BLOCKED) {
             Spacer(modifier = Modifier.width(8.dp))
 
             if (log.isFalsePositive) {

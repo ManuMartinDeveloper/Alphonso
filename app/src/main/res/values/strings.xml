@@ -3,5 +3,5 @@
     <string name="accessibility_service_label">Alphonso Consciousness</string>
     <string name="accessibility_service_description">AI-powered content filter that monitors screen content to protect the user.</string>
     <string name="device_admin_label">Alphonso Admin</string>
-    <string name="device_admin_description">Required to prevent unauthorized removal of the protection.</string>
+    <string name="device_admin_description">Required to block applications and prevent uninstallation.</string>
 </resources>

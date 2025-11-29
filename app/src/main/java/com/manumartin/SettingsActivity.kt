@@ -43,6 +43,7 @@ class SettingsActivity : ComponentActivity() {
         var remoteDisabledUntil by remember { mutableLongStateOf(0L) }
         var timeRemaining by remember { mutableStateOf("Active") }
         val thresholds = remember { mutableStateMapOf<String, String>() }
+        val behaviorSettings = remember { mutableStateMapOf<String, String>() }
 
         DisposableEffect(Unit) {
             val db = FirebaseDatabase.getInstance("https://alphonso-c7f69-default-rtdb.asia-southeast1.firebasedatabase.app")
@@ -55,15 +56,18 @@ class SettingsActivity : ComponentActivity() {
                 override fun onCancelled(error: DatabaseError) {}
             })
 
-            // *** ROBUST Firebase Threshold Listener ***
             val threshRef = db.getReference("config/thresholds")
             val threshListener = threshRef.addValueEventListener(object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
                     thresholds.clear()
                     snapshot.children.forEach { child ->
                         val labelName = child.key
-                        // Robustly get value as Number and convert to Float, handling different numeric types.
-                        val value = child.getValue(Number::class.java)?.toFloat()
+                        val rawValue = child.value
+                        val value = when (rawValue) {
+                            is Long -> rawValue.toFloat()
+                            is Double -> rawValue.toFloat()
+                            else -> null
+                        }
                         if (labelName != null && value != null) {
                             thresholds[labelName] = "${(value * 100).toInt()}%"
                         }
@@ -72,9 +76,24 @@ class SettingsActivity : ComponentActivity() {
                 override fun onCancelled(error: DatabaseError) {}
             })
 
+            val behaviorRef = db.getReference("config/behavior")
+            val behaviorListener = behaviorRef.addValueEventListener(object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) {
+                    behaviorSettings.clear()
+                    snapshot.child("lockoutDurationMinutes").getValue(Long::class.java)?.let { behaviorSettings["Lockout Duration"] = "$it minutes" }
+                    snapshot.child("strikeLimit").getValue(Int::class.java)?.let { behaviorSettings["Strike Limit"] = "$it strikes" }
+                    snapshot.child("scanDelayNormal").getValue(Long::class.java)?.let { behaviorSettings["Normal Scan Speed"] = "${it}ms" }
+                    snapshot.child("scanDelayAlert").getValue(Long::class.java)?.let { behaviorSettings["Alert Scan Speed"] = "${it}ms" }
+                    snapshot.child("strikeResetWindowMs").getValue(Long::class.java)?.let { behaviorSettings["Strike Reset Window"] = "${it / 1000}s" }
+                    snapshot.child("prayerText").getValue(String::class.java)?.let { behaviorSettings["Prayer Text"] = it }
+                }
+                override fun onCancelled(error: DatabaseError) {}
+            })
+
             onDispose {
                 disableRef.removeEventListener(disableListener)
                 threshRef.removeEventListener(threshListener)
+                behaviorRef.removeEventListener(behaviorListener)
             }
         }
 
@@ -97,60 +116,77 @@ class SettingsActivity : ComponentActivity() {
         Scaffold(
             topBar = { }
         ) { padding ->
-            Column(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp)) {
+            LazyColumn(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp)) {
 
-                Text("System Status", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                Spacer(modifier = Modifier.height(16.dp))
+                item {
+                    Text("System Status", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                    Spacer(modifier = Modifier.height(16.dp))
 
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = if (timeRemaining == "System Active") Color(0xFFE8F5E9) else Color(0xFFFFEBEE)
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text("Operational Status", fontWeight = FontWeight.Bold)
-                        Text(text = timeRemaining, fontSize = 20.sp, color = if (timeRemaining == "System Active") Color(0xFF4CAF50) else Color(0xFFF44336))
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (timeRemaining == "System Active") Color(0xFFE8F5E9) else Color(0xFFFFEBEE)
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Text("Operational Status", fontWeight = FontWeight.Bold)
+                            Text(text = timeRemaining, fontSize = 20.sp, color = if (timeRemaining == "System Active") Color(0xFF4CAF50) else Color(0xFFF44336))
+                        }
                     }
+
+                    Spacer(modifier = Modifier.height(24.dp))
+                    HorizontalDivider()
+                    Spacer(modifier = Modifier.height(24.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Global Lockdown Blackout", fontWeight = FontWeight.Bold)
+                            Text("Black out entire screen on 5th strike.", fontSize = 12.sp, color = Color.Gray)
+                        }
+                        Switch(
+                            checked = censorEnabled,
+                            onCheckedChange = {
+                                censorEnabled = it
+                                prefs.edit().putBoolean("censor_view_enabled", it).apply()
+                                Toast.makeText(context, "Restart Service to apply", Toast.LENGTH_SHORT).show()
+                            }
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(24.dp))
+                    HorizontalDivider()
+                    Spacer(modifier = Modifier.height(8.dp))
                 }
 
-                Spacer(modifier = Modifier.height(24.dp))
-                HorizontalDivider()
-                Spacer(modifier = Modifier.height(24.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Global Lockdown Blackout", fontWeight = FontWeight.Bold)
-                        Text("Black out entire screen on 5th strike.", fontSize = 12.sp, color = Color.Gray)
-                    }
-                    Switch(
-                        checked = censorEnabled,
-                        onCheckedChange = {
-                            censorEnabled = it
-                            prefs.edit().putBoolean("censor_view_enabled", it).apply()
-                            Toast.makeText(context, "Restart Service to apply", Toast.LENGTH_SHORT).show()
-                        }
-                    )
+                item {
+                    Text("Remote Behavior (Read-Only)", fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 8.dp))
                 }
+                items(behaviorSettings.toList().sortedBy { it.first }) { (label, value) ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(label, fontSize = 14.sp)
+                        Text(value, fontSize = 14.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start=8.dp))
+                    }
+                }
+                
+                item { Spacer(modifier = Modifier.height(24.dp)); HorizontalDivider(); Spacer(modifier = Modifier.height(8.dp)) }
 
-                Spacer(modifier = Modifier.height(24.dp))
-                HorizontalDivider()
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Text("Remote Sensitivity (Read-Only)", fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
-                    items(thresholds.toList().sortedBy { it.first }) { (label, value) ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(label, fontSize = 14.sp)
-                            Text(value, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                        }
+                item {
+                    Text("Remote Sensitivity (Read-Only)", fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 8.dp))
+                }
+                items(thresholds.toList().sortedBy { it.first }) { (label, value) ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(label, fontSize = 14.sp)
+                        Text(value, fontSize = 14.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }

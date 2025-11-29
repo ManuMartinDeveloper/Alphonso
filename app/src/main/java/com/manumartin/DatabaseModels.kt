@@ -4,9 +4,10 @@ import androidx.room.*
 
 // 1. The Enum
 enum class LogEventType {
-    DETECTION,      // AI found something
+    DETECTION,      // AI found something (High confidence - no longer used, replaced by WARNING)
     WARNING,        // User warned (Strike)
     APP_BLOCKED,    // App locked down
+    AI_CANDIDATE,   // AI found something with low confidence (for logging only)
     APP_RELEASED,   // User left app (Not currently used)
     FALSE_POSITIVE, // User flagged mistake
     RETRAINING,     // System updated weights
@@ -21,7 +22,7 @@ data class EventLogEntity(
     val eventType: String, // Store Enum as String
     val packageName: String,
     val details: String,
-    var isFalsePositive: Boolean = false, // Made it a var
+    var isFalsePositive: Boolean = false,
     val confidenceScore: Float = 0.0f
 )
 
@@ -40,7 +41,6 @@ interface EventLogDao {
     @Query("UPDATE event_logs SET isFalsePositive = 1 WHERE id = :id")
     suspend fun markAsFalsePositive(id: Int)
 
-    // *** NEW: Function to undo a flag ***
     @Query("UPDATE event_logs SET isFalsePositive = 0 WHERE id = :id")
     suspend fun unmarkAsFalsePositive(id: Int)
 }
