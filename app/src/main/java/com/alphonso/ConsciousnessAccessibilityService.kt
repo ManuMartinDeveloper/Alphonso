@@ -18,7 +18,7 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Toast
 import androidx.room.Room
-import com.google.firebase.auth.FirebaseAuth // <--- THIS WAS MISSING
+import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.database.DataSnapshot
 import com.google.firebase.database.DatabaseError
 import com.google.firebase.database.FirebaseDatabase
@@ -35,8 +35,8 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
 
     private var windowManager: WindowManager? = null
     private var censorView: CensorView? = null
-    private var screenCaptureScope = CoroutineScope(Dispatchers.Default)
-    private var inferenceScope = CoroutineScope(Dispatchers.Default)
+    private val screenCaptureScope = CoroutineScope(Dispatchers.Default)
+    private val inferenceScope = CoroutineScope(Dispatchers.Default)
 
     private var ortEnv: OrtEnvironment? = null
     private var ortSession: OrtSession? = null
@@ -44,8 +44,9 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     private var firebaseDb: FirebaseDatabase? = null
     private lateinit var dpm: DevicePolicyManager
     private lateinit var adminComponent: ComponentName
+    private val auth = FirebaseAuth.getInstance()
 
-    // --- State & Config Variables ---
+    // --- State Variables ---
     private var strikeCount = 0
     private var lastStrikeTime = 0L
     private var lastStrikePackage = ""
@@ -56,25 +57,12 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     private var censorGloballyDisabled = false
     private var isGlobalLockoutActive = false
 
-    // --- VARIABLES TO ADD TO YOUR CLASS ---
-
-    // 1. The list of bad words (Synced from Firebase, but defaults here)
-    private val defaultBlocklist = setOf(
-        "pornhub", "xvideos", "xnxx", "chaturbate", "redtube",
-        "youporn", "xhamster", "brazzers", "adultfriendfinder",
-        "nude", "porn", "sexy", "xxx", "hentai"
-    )
+    // --- Config ---
+    private val defaultBlocklist = setOf("pornhub", "xvideos", "xnxx", "chaturbate", "redtube", "youporn", "xhamster", "brazzers", "adultfriendfinder", "nude", "porn", "sexy", "xxx", "hentai")
     private val blocklist = mutableListOf<String>().apply { addAll(defaultBlocklist) }
 
-    // 2. Browsers where we specifically check the URL bar first (Optimization)
-    private val browserPackages = setOf(
-        "com.android.chrome",
-        "org.mozilla.firefox",
-        "com.duckduckgo.mobile.android",
-        "com.microsoft.emmx" // Edge
-    )
+    private val browserPackages = setOf("com.android.chrome", "org.mozilla.firefox", "com.duckduckgo.mobile.android", "com.microsoft.emmx")
 
-    // --- Remotely Configurable Settings with Local Defaults ---
     private var lockoutDurationMinutes = 3L
     private var strikeLimit = 5
     private var scanDelayNormal = 2000L
@@ -82,9 +70,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     private var strikeResetWindowMs = 300000L
     private var prayerText = "Hail Mary, full of grace, the Lord is with thee. Blessed art thou among women, and blessed is the fruit of thy womb, Jesus. Holy Mary, Mother of God, pray for us sinners, now and at the hour of our death. Amen."
 
-    private val labelThresholds = mutableMapOf<Int, Float>().apply {
-        put(2, 0.60f); put(3, 0.55f); put(4, 0.50f); put(6, 0.50f); put(14, 0.50f)
-    }
+    private val labelThresholds = mutableMapOf(2 to 0.60f, 3 to 0.55f, 4 to 0.50f, 6 to 0.50f, 14 to 0.50f)
     private val defaultThreshold = 0.65f
     private val lowConfidenceLogThreshold = 0.15f
 
@@ -109,121 +95,48 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         Log.i(TAG, ">>> SERVICE STARTED <<<")
         tts = TextToSpeech(this, this)
         dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
-        adminComponent = ComponentName(this, DeviceAdminReceiver::class.java)
+        adminComponent = ComponentName(this, ConsciousnessDeviceAdminReceiver::class.java)
+
         try {
-            firebaseDb = FirebaseDatabase.getInstance("https://alphonso-c7f69-default-rtdb.asia-southeast1.firebasedatabase.app")
+            firebaseDb = FirebaseDatabase.getInstance()
             listenToFirebaseConfig()
         } catch (e: Exception) { Log.e(TAG, "Firebase Init Failed", e) }
+
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         val db = Room.databaseBuilder(applicationContext, EventLogDatabase::class.java, "event-log-database").build()
         eventLogDao = db.eventLogDao()
+
         initializeCensorView()
         initializeAI()
         startScreenCapture()
     }
 
     private fun listenToFirebaseConfig() {
-        firebaseDb?.getReference("remote_settings/filtering_disabled_until")?.addValueEventListener(object : ValueEventListener {
+        val dbRef = firebaseDb?.reference ?: return
+        dbRef.child("remote_settings/filtering_disabled_until").addValueEventListener(object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) { remoteDisabledUntil = snapshot.getValue(Long::class.java) ?: 0L }
             override fun onCancelled(error: DatabaseError) {}
         })
-
-        firebaseDb?.getReference("remote_settings/censor_globally_disabled")?.addValueEventListener(object : ValueEventListener {
+        dbRef.child("remote_settings/censor_globally_disabled").addValueEventListener(object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
                 censorGloballyDisabled = snapshot.getValue(Boolean::class.java) ?: false
-                if (censorGloballyDisabled) {
-                    GlobalScope.launch(Dispatchers.Main) { censorView?.clear() }
-                }
+                if (censorGloballyDisabled) GlobalScope.launch(Dispatchers.Main) { censorView?.clear() }
             }
             override fun onCancelled(error: DatabaseError) {}
         })
-
-        firebaseDb?.getReference("remote_settings/global_lockout_enabled")?.addValueEventListener(object : ValueEventListener {
-            override fun onDataChange(snapshot: DataSnapshot) {
-                isGlobalLockoutActive = snapshot.getValue(Boolean::class.java) ?: false
-                GlobalScope.launch(Dispatchers.Main) {
-                    if (isGlobalLockoutActive) {
-                        censorView?.triggerLockdown()
-                    } else {
-                        censorView?.clearGlobalLockdown()
-                    }
-                }
-            }
-            override fun onCancelled(error: DatabaseError) {}
-        })
-
-
-        firebaseDb?.getReference("config/thresholds")?.addValueEventListener(object : ValueEventListener {
-            override fun onDataChange(snapshot: DataSnapshot) {
-                for (child in snapshot.children) {
-                    val labelName = child.key
-                    val rawValue = child.value
-                    val thresholdValue = when (rawValue) {
-                        is Long -> rawValue.toFloat()
-                        is Double -> rawValue.toFloat()
-                        else -> null
-                    }
-                    if (labelName != null && thresholdValue != null) {
-                        val index = ALL_CLASSES.indexOf(labelName)
-                        if (index != -1) labelThresholds[index] = thresholdValue
-                    }
-                }
-            }
-            override fun onCancelled(error: DatabaseError) {}
-        })
-
-        firebaseDb?.getReference("config/blocklist")?.addValueEventListener(object : ValueEventListener {
+        dbRef.child("config/blocklist").addValueEventListener(object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
                 blocklist.clear()
                 snapshot.children.forEach { child -> child.getValue(String::class.java)?.let { blocklist.add(it.lowercase()) } }
-                Log.i(TAG, "Updated blocklist from Firebase: $blocklist")
             }
             override fun onCancelled(error: DatabaseError) {}
         })
-
-        firebaseDb?.getReference("config/behavior")?.addValueEventListener(object : ValueEventListener {
-            override fun onDataChange(snapshot: DataSnapshot) {
-                Log.i(TAG, "Behavior settings updated from Firebase.")
-                snapshot.child("lockoutDurationMinutes").getValue(Long::class.java)?.let { lockoutDurationMinutes = it }
-                snapshot.child("strikeLimit").getValue(Int::class.java)?.let { strikeLimit = it }
-                snapshot.child("scanDelayNormal").getValue(Long::class.java)?.let { scanDelayNormal = it }
-                snapshot.child("scanDelayAlert").getValue(Long::class.java)?.let { scanDelayAlert = it }
-                snapshot.child("strikeResetWindowMs").getValue(Long::class.java)?.let { strikeResetWindowMs = it }
-                snapshot.child("prayerText").getValue(String::class.java)?.let { prayerText = it }
-            }
-            override fun onCancelled(error: DatabaseError) {}
-        })
-    }
-
-    private fun resizeWithPadding(original: Bitmap, targetWidth: Int, targetHeight: Int): Bitmap {
-        val background = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
-        val canvas = android.graphics.Canvas(background)
-        canvas.drawColor(android.graphics.Color.BLACK)
-        val originalWidth = original.width.toFloat()
-        val originalHeight = original.height.toFloat()
-        val scale = kotlin.math.min(targetWidth / originalWidth, targetHeight / originalHeight)
-        val newWidth = originalWidth * scale
-        val newHeight = originalHeight * scale
-        val x = (targetWidth - newWidth) / 2
-        val y = (targetHeight - newHeight) / 2
-        val matrix = android.graphics.Matrix()
-        matrix.setScale(scale, scale)
-        matrix.postTranslate(x, y)
-        val paint = android.graphics.Paint()
-        paint.isFilterBitmap = true
-        canvas.drawBitmap(original, matrix, paint)
-        return background
     }
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
             tts?.language = Locale.US
             isTtsReady = true
-            tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                override fun onStart(utteranceId: String?) { isCurrentlySpeaking = true }
-                override fun onDone(utteranceId: String?) { isCurrentlySpeaking = false }
-                override fun onError(utteranceId: String?) { isCurrentlySpeaking = false }
-            })
         }
     }
 
@@ -247,27 +160,23 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     private fun startScreenCapture() {
         screenCaptureScope.launch {
             while (isActive) {
-                if (System.currentTimeMillis() < remoteDisabledUntil || isGlobalLockoutActive) {
+                if (System.currentTimeMillis() < remoteDisabledUntil || censorGloballyDisabled) {
                     withContext(Dispatchers.Main) { censorView?.clear() }
                     delay(5000)
                     continue
                 }
-
                 takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
                     override fun onSuccess(screenshot: ScreenshotResult) {
-                        val hardwareBitmap = Bitmap.wrapHardwareBuffer(screenshot.hardwareBuffer, screenshot.colorSpace)
-                        hardwareBitmap?.let {
-                            val softwareBitmap = it.copy(Bitmap.Config.ARGB_8888, true)
-                            processImage(softwareBitmap)
+                        val bitmap = Bitmap.wrapHardwareBuffer(screenshot.hardwareBuffer, screenshot.colorSpace)
+                        bitmap?.let {
+                            processImage(it.copy(Bitmap.Config.ARGB_8888, true))
                             it.recycle()
                         }
                         screenshot.hardwareBuffer.close()
                     }
                     override fun onFailure(errorCode: Int) {}
                 })
-
-                val delayTime = if (System.currentTimeMillis() < highAlertUntil) scanDelayAlert else scanDelayNormal
-                delay(delayTime)
+                delay(if (System.currentTimeMillis() < highAlertUntil) scanDelayAlert else scanDelayNormal)
             }
         }
     }
@@ -275,24 +184,17 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     private fun processImage(bitmap: Bitmap) {
         inferenceScope.launch {
             try {
-                if (ortSession == null) {
-                    bitmap.recycle() // Safety recycle
-                    return@launch
-                }
-
+                if (ortSession == null) { bitmap.recycle(); return@launch }
                 val resized = resizeWithPadding(bitmap, 320, 320)
                 val floatBuffer = preprocessBitmap(resized)
-
                 val inputName = ortSession?.inputNames?.iterator()?.next() ?: return@launch
                 val inputTensor = OnnxTensor.createTensor(ortEnv, floatBuffer, longArrayOf(1, 3, 320, 320))
 
                 ortSession?.run(Collections.singletonMap(inputName, inputTensor))?.use { results ->
                     val output = (results.get(0).value as? Array<Array<FloatArray>>)?.get(0)
-
                     if (output != null) {
                         val allDetectedBoxes = mutableListOf<Rect>()
                         var highConfidenceTrigger: Pair<String, Float>? = null
-                        var bestCandidate: Pair<String, Float>? = null
 
                         val screenWidth = bitmap.width.toFloat()
                         val screenHeight = bitmap.height.toFloat()
@@ -304,274 +206,142 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                         for (i in 0 until output[0].size) {
                             var maxScore = 0f
                             var classIndex = -1
-
                             for (c in 0 until 18) {
                                 val score = output[c + 4][i]
                                 if (score > maxScore) { maxScore = score; classIndex = c }
                             }
-
                             if (!SENSITIVE_INDICES.contains(classIndex)) continue
-
                             val actionThreshold = labelThresholds[classIndex] ?: defaultThreshold
-
-                            if (maxScore > lowConfidenceLogThreshold) {
-                                val cx = output[0][i]
-                                val cy = output[1][i]
-                                val w = output[2][i]
-                                val h = output[3][i]
-
-                                val realCx = (cx - offsetX) / scale
-                                val realCy = (cy - offsetY) / scale
-                                val realW = w / scale
-                                val realH = h / scale
-
-                                val left = (realCx - realW / 2).toInt()
-                                val top = (realCy - realH / 2).toInt()
-                                val right = (realCx + realW / 2).toInt()
-                                val bottom = (realCy + realH / 2).toInt()
-
-                                if (maxScore > actionThreshold) {
-                                    allDetectedBoxes.add(Rect(left, top, right, bottom))
-                                    val label = ALL_CLASSES.getOrElse(classIndex) { "Unknown" }
-                                    if (highConfidenceTrigger == null || maxScore > highConfidenceTrigger!!.second) {
-                                        highConfidenceTrigger = Pair(label, maxScore)
-                                    }
-                                } else {
-                                    val label = ALL_CLASSES.getOrElse(classIndex) { "Unknown" }
-                                    if (bestCandidate == null || maxScore > bestCandidate!!.second) {
-                                        bestCandidate = Pair(label, maxScore)
-                                    }
+                            if (maxScore > actionThreshold) {
+                                val cx = output[0][i]; val cy = output[1][i]; val w = output[2][i]; val h = output[3][i]
+                                val realCx = (cx - offsetX) / scale; val realCy = (cy - offsetY) / scale
+                                val realW = w / scale; val realH = h / scale
+                                val left = (realCx - realW / 2).toInt(); val top = (realCy - realH / 2).toInt()
+                                val right = (realCx + realW / 2).toInt(); val bottom = (realCy + realH / 2).toInt()
+                                allDetectedBoxes.add(Rect(left, top, right, bottom))
+                                val label = ALL_CLASSES.getOrElse(classIndex) { "Unknown" }
+                                if (highConfidenceTrigger == null || maxScore > highConfidenceTrigger!!.second) {
+                                    highConfidenceTrigger = Pair(label, maxScore)
                                 }
                             }
                         }
 
                         withContext(Dispatchers.Main) {
-                            if (isGlobalLockoutActive) {
-                                censorView?.triggerLockdown()
-                            } else if (censorGloballyDisabled) {
-                                censorView?.clear()
-                            } else if (allDetectedBoxes.isNotEmpty()) {
-                                censorView?.censorAreas(allDetectedBoxes, bitmap)
-                            } else {
-                                censorView?.clear()
-                            }
-
                             if (allDetectedBoxes.isNotEmpty()) {
-                                highConfidenceTrigger?.let {
-                                    handleDetections(it.first, it.second)
-                                }
+                                censorView?.censorAreas(allDetectedBoxes, bitmap)
+                                highConfidenceTrigger?.let { handleDetections(it.first, it.second) }
                             } else {
-                                bestCandidate?.let {
-                                    inferenceScope.launch {
-                                        logEvent(LogEventType.AI_CANDIDATE, "Candidate: ${it.first}", it.second)
-                                    }
-                                }
+                                censorView?.clear()
                             }
                         }
                     }
                 }
-
-                inputTensor.close()
-                resized.recycle()
-                bitmap.recycle()
-
-            } catch (e: Exception) {
-                Log.e(TAG, "Inference Failed", e)
-                bitmap.recycle()
-            }
+                inputTensor.close(); resized.recycle(); bitmap.recycle()
+            } catch (e: Exception) { bitmap.recycle() }
         }
     }
 
     private fun handleDetections(label: String, confidence: Float) {
         if (isCurrentlySpeaking) return
-
-        if (isLockedOut) {
-            Log.d(TAG, "Detection ($label) during lockdown. Censoring is active.")
-            inferenceScope.launch { logEvent(LogEventType.AI_CANDIDATE, "Detection during lockdown: $label", confidence) }
-            return
-        }
-
-        val now = System.currentTimeMillis()
-        val currentPackage = rootInActiveWindow?.packageName?.toString() ?: "unknown"
-        highAlertUntil = now + 60000L
-
-        if (currentPackage != lastStrikePackage || (now - lastStrikeTime > strikeResetWindowMs)) {
-            strikeCount = 0
-        }
+        if (isLockedOut) return
 
         strikeCount++
-        lastStrikeTime = now
-        lastStrikePackage = currentPackage
-
-        Toast.makeText(this, "Strike $strikeCount/$strikeLimit: $label", Toast.LENGTH_SHORT).show()
-
+        Toast.makeText(this, "Strike $strikeCount: $label", Toast.LENGTH_SHORT).show()
         logToFirebase(label, confidence)
-        inferenceScope.launch { logEvent(LogEventType.WARNING, "Strike $strikeCount for: $label", confidence) }
         speakPrayer()
 
         if (strikeCount >= strikeLimit) {
-            initiateLockdown("$strikeLimit Strikes: $label", confidence, currentPackage)
+            initiateLockdown("Strike Limit Reached: $label", confidence, rootInActiveWindow?.packageName?.toString() ?: "unknown")
         }
     }
 
-    @OptIn(DelicateCoroutinesApi::class)
     private fun initiateLockdown(reason: String, confidence: Float, packageName: String) {
         if (isLockedOut) return
-        Log.e(TAG, "LOCKDOWN INITIATED for package: $packageName due to $reason")
-
-        try {
-            dpm.setApplicationHidden(adminComponent, packageName, true)
-        } catch (e: SecurityException) {
-            Log.e(TAG, "Not device owner, cannot hide application")
-            isLockedOut = true
-            lockedOutPackage = packageName
-        }
+        try { dpm.setApplicationHidden(adminComponent, packageName, true) }
+        catch (e: SecurityException) { isLockedOut = true; lockedOutPackage = packageName }
 
         strikeCount = 0
-        highAlertUntil = System.currentTimeMillis() + 120000L
-        logToFirebase("LOCKDOWN: $reason on $packageName", confidence)
-        inferenceScope.launch { logEvent(LogEventType.APP_BLOCKED, "Lockdown for $packageName due to: $reason", confidence) }
+        logToFirebase("LOCKDOWN: $packageName", confidence)
         censorView?.clear()
         speakPrayer()
         performGlobalAction(GLOBAL_ACTION_HOME)
 
         GlobalScope.launch(Dispatchers.Main) {
             delay(lockoutDurationMinutes * 60 * 1000)
-            try {
-                dpm.setApplicationHidden(adminComponent, packageName, false)
-                Log.i(TAG, "Lockdown penalty lifted, un-hid package: $packageName")
-            } catch (e: SecurityException) {
-                Log.e(TAG, "Not device owner, cannot un-hide application")
-                isLockedOut = false
-                lockedOutPackage = null
-            }
-            Toast.makeText(applicationContext, "Penalty Lifted.", Toast.LENGTH_LONG).show()
+            try { dpm.setApplicationHidden(adminComponent, packageName, false) }
+            catch (e: SecurityException) { isLockedOut = false; lockedOutPackage = null }
         }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null || System.currentTimeMillis() < remoteDisabledUntil || isGlobalLockoutActive) return
+        if (event == null || isLockedOut) return
 
-        if (isLockedOut && lockedOutPackage != null) {
-            if (event.packageName?.toString() == lockedOutPackage) {
-                performGlobalAction(GLOBAL_ACTION_HOME)
-                return
-            }
-        }
+        // Text Scanning Logic
+        val packageName = event.packageName?.toString() ?: return
+        if (browserPackages.contains(packageName) || !packageName.contains("systemui")) {
+            val rootNode = rootInActiveWindow ?: return
+            val allText = getAllTextFromNode(rootNode).joinToString(" ").lowercase()
 
-        if (!isLockedOut) {
-            val packageName = event.packageName?.toString() ?: return
-
-            if (browserPackages.contains(packageName)) {
-                val rootNode = rootInActiveWindow ?: return
-                val urlBarText = findUrlBarText(rootNode)
-
-                if (urlBarText != null && checkAndBlock(urlBarText, packageName)) {
+            for (keyword in blocklist) {
+                if (allText.contains(keyword)) {
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                    performGlobalAction(GLOBAL_ACTION_HOME)
+                    logToFirebase("Text Block: $keyword", 1.0f)
+                    Toast.makeText(this, "Blocked: $keyword", Toast.LENGTH_SHORT).show()
                     return
                 }
             }
-
-            if (!packageName.contains("com.android.systemui")) {
-                val rootNode = rootInActiveWindow ?: return
-                val allText = getAllTextFromNode(rootNode).joinToString(" ").lowercase()
-
-                if (allText.isNotEmpty()) {
-                    checkAndBlock(allText, packageName)
-                }
-            }
         }
-    }
-
-    private fun checkAndBlock(text: String, packageName: String): Boolean {
-        val lowerText = text.lowercase()
-
-        for (keyword in blocklist) {
-            val regex = Regex("\\b${Regex.escape(keyword)}\\b")
-
-            if (regex.containsMatchIn(lowerText)) {
-                Log.w(TAG, "BLOCKED TEXT: '$keyword' in $packageName")
-                Toast.makeText(this, "Restricted Content: $keyword", Toast.LENGTH_SHORT).show()
-                performGlobalAction(GLOBAL_ACTION_BACK)
-                performGlobalAction(GLOBAL_ACTION_HOME)
-                inferenceScope.launch {
-                    logEvent(LogEventType.APP_BLOCKED, "Text Block: $keyword", 1.0f)
-                }
-                return true
-            }
-        }
-        return false
     }
 
     private fun getAllTextFromNode(node: AccessibilityNodeInfo?): List<String> {
         if (node == null) return emptyList()
-        val textList = mutableListOf<String>()
-        node.text?.let { textList.add(it.toString()) }
-        node.contentDescription?.let { textList.add(it.toString()) }
-        for (i in 0 until node.childCount) {
-            textList.addAll(getAllTextFromNode(node.getChild(i)))
-        }
-        return textList
-    }
-
-    private fun findUrlBarText(nodeInfo: AccessibilityNodeInfo): String? {
-        val browserUrlBarIds = listOf(
-            "com.android.chrome:id/url_bar",
-            "org.mozilla.firefox:id/url_bar_title",
-            "com.duckduckgo.mobile.android:id/omnibarTextInput",
-            "com.microsoft.emmx:id/url_bar"
-        )
-
-        for (id in browserUrlBarIds) {
-            val nodes = nodeInfo.findAccessibilityNodeInfosByViewId(id)
-            if (nodes != null && nodes.isNotEmpty()) {
-                return nodes[0].text?.toString()
-            }
-        }
-        return null
+        val list = mutableListOf<String>()
+        node.text?.let { list.add(it.toString()) }
+        for (i in 0 until node.childCount) list.addAll(getAllTextFromNode(node.getChild(i)))
+        return list
     }
 
     private fun speakPrayer() {
-        if (isTtsReady) {
-            val utteranceId = this.hashCode().toString()
-            val params = Bundle()
-            params.putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId)
-            tts?.speak(prayerText, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
-        }
+        if (isTtsReady) tts?.speak(prayerText, TextToSpeech.QUEUE_FLUSH, null, "prayer")
     }
 
     private fun logToFirebase(label: String, confidence: Float) {
+        val uid = auth.currentUser?.uid ?: return
         val entry = mapOf("timestamp" to System.currentTimeMillis(), "label" to label, "confidence" to confidence)
-        val uid = FirebaseAuth.getInstance().currentUser?.uid
-        if (uid != null) {
-            firebaseDb?.getReference("users/$uid/incidents")?.push()?.setValue(entry)
-        }
+        firebaseDb?.getReference("users/$uid/incidents")?.push()?.setValue(entry)
+    }
+
+    private fun resizeWithPadding(original: Bitmap, w: Int, h: Int): Bitmap {
+        val bg = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val c = android.graphics.Canvas(bg)
+        c.drawColor(android.graphics.Color.BLACK)
+        val scale = kotlin.math.min(w.toFloat() / original.width, h.toFloat() / original.height)
+        val m = android.graphics.Matrix()
+        m.setScale(scale, scale)
+        m.postTranslate((w - original.width * scale) / 2, (h - original.height * scale) / 2)
+        c.drawBitmap(original, m, android.graphics.Paint().apply { isFilterBitmap = true })
+        return bg
     }
 
     private fun preprocessBitmap(bitmap: Bitmap): FloatBuffer {
-        val buffer = FloatBuffer.allocate(1 * 3 * 320 * 320)
+        val buffer = FloatBuffer.allocate(3 * 320 * 320)
         val intValues = IntArray(320 * 320)
         bitmap.getPixels(intValues, 0, 320, 0, 0, 320, 320)
         for (i in 0 until 320 * 320) {
-            val pixel = intValues[i]
-            buffer.put(i, ((pixel shr 16) and 0xFF) / 255.0f)
-            buffer.put(i + 320*320, ((pixel shr 8) and 0xFF) / 255.0f)
-            buffer.put(i + 2*320*320, (pixel and 0xFF) / 255.0f)
+            val px = intValues[i]
+            buffer.put(i, ((px shr 16) and 0xFF) / 255.0f)
+            buffer.put(i + 320*320, ((px shr 8) and 0xFF) / 255.0f)
+            buffer.put(i + 2*320*320, (px and 0xFF) / 255.0f)
         }
         buffer.rewind()
         return buffer
     }
 
-    private suspend fun logEvent(type: LogEventType, details: String, confidence: Float) {
-        val log = EventLogEntity(eventType = type.name, packageName = (rootInActiveWindow?.packageName?.toString() ?: "unknown"), details = details, confidenceScore = confidence)
-        eventLogDao.insert(log)
-    }
-
+    override fun onInterrupt() {}
     override fun onDestroy() {
-        tts?.stop()
         tts?.shutdown()
         try { windowManager?.removeView(censorView) } catch (_: Exception) {}
         super.onDestroy()
     }
-
-    override fun onInterrupt() {}
 }

@@ -1,53 +1,33 @@
 package com.alphonso
-
 import androidx.room.*
 
-// 1. The Enum
-enum class LogEventType {
-    DETECTION,      // AI found something
-    WARNING,        // User warned (Strike)
-    APP_BLOCKED,    // App locked down
-    AI_CANDIDATE,   // Low confidence detection
-    APP_RELEASED,   // (Unused)
-    FALSE_POSITIVE, // User flagged mistake
-    RETRAINING,     // System updated weights
-    SERVICE_EVENT   // Service started/stopped
-}
+enum class LogEventType { DETECTION, WARNING, APP_BLOCKED, AI_CANDIDATE, APP_RELEASED, FALSE_POSITIVE, RETRAINING, SERVICE_EVENT }
 
-// 2. The Entity (Table)
 @Entity(tableName = "event_logs")
 data class EventLogEntity(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
     val timestamp: Long = System.currentTimeMillis(),
-    val eventType: String, // Store Enum as String
+    val eventType: String,
     val packageName: String,
     val details: String,
     var isFalsePositive: Boolean = false,
     val confidenceScore: Float = 0.0f
 )
 
-// 3. The DAO (Queries)
 @Dao
 interface EventLogDao {
     @Query("SELECT * FROM event_logs ORDER BY timestamp DESC")
     suspend fun getAll(): List<EventLogEntity>
-
     @Insert
     suspend fun insert(log: EventLogEntity)
-
     @Query("DELETE FROM event_logs")
     suspend fun clearAll()
-
-    // --- FIX: Added these missing methods back ---
     @Query("UPDATE event_logs SET isFalsePositive = 1 WHERE id = :id")
     suspend fun markAsFalsePositive(id: Int)
-
     @Query("UPDATE event_logs SET isFalsePositive = 0 WHERE id = :id")
     suspend fun unmarkAsFalsePositive(id: Int)
 }
 
-// 4. The Database
-// Note: exportSchema = false fixes the other build error you saw previously
 @Database(entities = [EventLogEntity::class], version = 1, exportSchema = false)
 abstract class EventLogDatabase : RoomDatabase() {
     abstract fun eventLogDao(): EventLogDao

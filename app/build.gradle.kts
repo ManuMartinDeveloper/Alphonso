@@ -8,16 +8,15 @@ plugins {
 }
 
 android {
-    namespace = "com.alphonso" // UPDATED
-    compileSdk = 36
+    namespace = "com.alphonso"
+    compileSdk = 35 // STABLE
 
     defaultConfig {
-        applicationId = "com.alphonso" // UPDATED
-        minSdk = 33
-        targetSdk = 36
+        applicationId = "com.alphonso"
+        minSdk = 29
+        targetSdk = 35 // STABLE
         versionCode = 1
         versionName = "1.0"
-
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -37,9 +36,6 @@ android {
     buildFeatures {
         compose = true
     }
-    androidResources {
-        noCompress += listOf("onnx", "ckpt")
-    }
     packaging {
         jniLibs.pickFirsts.add("lib/**/libonnxruntime.so")
         jniLibs.pickFirsts.add("lib/**/libonnxruntime_training.so")
@@ -47,34 +43,31 @@ android {
 }
 
 dependencies {
-    // ONNX
-    implementation("com.microsoft.onnxruntime:onnxruntime-training-android:1.19.2")
+    // AI
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.19.2")
 
-    // Android & Compose
-    implementation(libs.androidx.core.ktx)
-    implementation(libs.androidx.lifecycle.runtime.ktx)
-    implementation(libs.androidx.activity.compose)
-    implementation(platform(libs.androidx.compose.bom))
-    implementation(libs.androidx.compose.ui)
-    implementation(libs.androidx.compose.ui.graphics)
-    implementation(libs.androidx.compose.ui.tooling.preview)
-    implementation(libs.androidx.compose.material3)
+    // Android Core (Pinned to stable versions)
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.6")
+    implementation("androidx.activity:activity-compose:1.9.3")
+    implementation(platform("androidx.compose:compose-bom:2024.04.01"))
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-graphics")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
-    implementation("androidx.compose.runtime:runtime-livedata")
 
-    // Firebase (UPDATED)
+    // Firebase
     implementation(platform("com.google.firebase:firebase-bom:33.0.0"))
     implementation("com.google.firebase:firebase-database-ktx")
-    implementation("com.google.firebase:firebase-auth-ktx") // Added Auth
+    implementation("com.google.firebase:firebase-auth-ktx")
     implementation("com.google.firebase:firebase-common-ktx")
     implementation("com.google.firebase:firebase-storage-ktx")
 
-    // Room
+    // Database & Workers
     implementation("androidx.room:room-runtime:2.6.1")
     ksp("androidx.room:room-compiler:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")
-
-    // WorkManager
     implementation("androidx.work:work-runtime-ktx:2.9.0")
 
     // Testing
