@@ -292,7 +292,10 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     private fun processImage(bitmap: Bitmap) {
         inferenceScope.launch {
             try {
-                if (ortSession == null) return@launch
+                if (ortSession == null) {
+                    bitmap.recycle() // Safety recycle
+                    return@launch
+                }
 
                 // 1. Resize with padding (Letterboxing)
                 val resized = resizeWithPadding(bitmap, 320, 320)
@@ -307,45 +310,42 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                     if (output != null) {
                         val allDetectedBoxes = mutableListOf<Rect>()
 
-                        // --- COORDINATE CORRECTION START ---
-                        // We must calculate exactly how the image was scaled/padded
-                        // to map the 320x320 AI coordinates back to the full screen.
+                        // Variables to track the "worst" thing found in this frame
+                        var highConfidenceTrigger: Pair<String, Float>? = null
+                        var bestCandidate: Pair<String, Float>? = null
+
+                        // --- COORDINATE CORRECTION CALCULATION ---
                         val screenWidth = bitmap.width.toFloat()
                         val screenHeight = bitmap.height.toFloat()
                         val targetDim = 320f
-
-                        // Calculate the scale factor used (fitting within 320x320)
                         val scale = kotlin.math.min(targetDim / screenWidth, targetDim / screenHeight)
-
-                        // Calculate the padding (black bars) offsets
                         val offsetX = (targetDim - screenWidth * scale) / 2
                         val offsetY = (targetDim - screenHeight * scale) / 2
-                        // --- COORDINATE CORRECTION END ---
 
                         for (i in 0 until output[0].size) {
                             var maxScore = 0f
                             var classIndex = -1
 
-                            // Find the best class for this box
+                            // Find the best class for this specific box
                             for (c in 0 until 18) {
                                 val score = output[c + 4][i]
                                 if (score > maxScore) { maxScore = score; classIndex = c }
                             }
 
+                            // Skip if it's not a sensitive body part
                             if (!SENSITIVE_INDICES.contains(classIndex)) continue
 
-                            // Filter by confidence threshold
+                            // Get the threshold for this specific body part
                             val actionThreshold = labelThresholds[classIndex] ?: defaultThreshold
 
-                            if (maxScore > actionThreshold) {
+                            // Only calculate geometry if it passes the "Logging" threshold
+                            if (maxScore > lowConfidenceLogThreshold) {
                                 val cx = output[0][i]
                                 val cy = output[1][i]
                                 val w = output[2][i]
                                 val h = output[3][i]
 
-                                // --- UN-MAP COORDINATES ---
-                                // 1. Remove the offset (black bars)
-                                // 2. Divide by scale to get back to original pixels
+                                // --- UN-MAP COORDINATES (Math to fix the "Placing" issue) ---
                                 val realCx = (cx - offsetX) / scale
                                 val realCy = (cy - offsetY) / scale
                                 val realW = w / scale
@@ -356,32 +356,69 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                                 val right = (realCx + realW / 2).toInt()
                                 val bottom = (realCy + realH / 2).toInt()
 
-                                allDetectedBoxes.add(Rect(left, top, right, bottom))
+                                // CHECK: Is this a STRIKE or just a CANDIDATE?
+                                if (maxScore > actionThreshold) {
+                                    allDetectedBoxes.add(Rect(left, top, right, bottom))
+
+                                    val label = ALL_CLASSES.getOrElse(classIndex) { "Unknown" }
+
+                                    // Track the highest confidence strike to report it
+                                    if (highConfidenceTrigger == null || maxScore > highConfidenceTrigger!!.second) {
+                                        highConfidenceTrigger = Pair(label, maxScore)
+                                    }
+                                } else {
+                                    // Just a candidate (for logs only)
+                                    val label = ALL_CLASSES.getOrElse(classIndex) { "Unknown" }
+                                    if (bestCandidate == null || maxScore > bestCandidate!!.second) {
+                                        bestCandidate = Pair(label, maxScore)
+                                    }
+                                }
                             }
                         }
 
-                        // Update UI
+                        // --- UI & LOGIC UPDATE (Main Thread) ---
                         withContext(Dispatchers.Main) {
                             if (isGlobalLockoutActive) {
                                 censorView?.triggerLockdown()
                             } else if (censorGloballyDisabled) {
                                 censorView?.clear()
                             } else if (allDetectedBoxes.isNotEmpty()) {
-                                // Pass the original bitmap for blurring
+                                // Pass the bitmap to CensorView so it can create the blur
                                 censorView?.censorAreas(allDetectedBoxes, bitmap)
                             } else {
                                 censorView?.clear()
+                            }
+
+                            // --- WARNING LOGIC (The part that was missing) ---
+                            if (allDetectedBoxes.isNotEmpty()) {
+                                // If we have a strike, punish the user
+                                highConfidenceTrigger?.let {
+                                    handleDetections(it.first, it.second)
+                                }
+                            } else {
+                                // No strike, but maybe log the candidate
+                                bestCandidate?.let {
+                                    // Launch back into background to save to DB
+                                    inferenceScope.launch {
+                                        logEvent(LogEventType.AI_CANDIDATE, "Candidate: ${it.first}", it.second)
+                                    }
+                                }
                             }
                         }
                     }
                 }
 
+                // Cleanup
                 inputTensor.close()
-                // Do not recycle 'bitmap' here if CensorView is using it asynchronously,
-                // but since we pass it to CensorView which makes a copy/crop, we can handle it there.
                 resized.recycle()
 
-            } catch (e: Exception) { Log.e(TAG, "Inference Failed", e) }
+                // --- CRITICAL FIX: Recycle the original bitmap to prevent OutOfMemory ---
+                bitmap.recycle()
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Inference Failed", e)
+                bitmap.recycle() // Recycle even if it fails!
+            }
         }
     }
 
