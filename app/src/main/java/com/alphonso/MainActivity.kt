@@ -1,8 +1,7 @@
-package com.manumartin
+package com.alphonso
 
 import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
-import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.provider.Settings
@@ -16,7 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.work.*
-import com.manumartin.ui.theme.AlphonsoTheme
+import com.alphonso.ui.theme.AlphonsoTheme
 import java.util.concurrent.TimeUnit
 
 class MainActivity : ComponentActivity() {

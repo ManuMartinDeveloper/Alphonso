@@ -1,4 +1,4 @@
-package com.manumartin
+package com.alphonso
 
 import org.junit.Test
 

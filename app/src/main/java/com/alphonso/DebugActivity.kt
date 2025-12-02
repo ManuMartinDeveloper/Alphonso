@@ -1,4 +1,4 @@
-package com.manumartin
+package com.alphonso
 
 import android.os.Bundle
 import android.widget.Toast
@@ -22,13 +22,9 @@ import androidx.compose.ui.unit.sp
 import androidx.room.Room
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
-import com.google.firebase.database.DataSnapshot
-import com.google.firebase.database.DatabaseError
 import com.google.firebase.database.FirebaseDatabase
-import com.google.firebase.database.ValueEventListener
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat

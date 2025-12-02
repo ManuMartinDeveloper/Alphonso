@@ -8,11 +8,11 @@ plugins {
 }
 
 android {
-    namespace = "com.manumartin"
+    namespace = "com.alphonso" // UPDATED
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.manumartin"
+        applicationId = "com.alphonso" // UPDATED
         minSdk = 33
         targetSdk = 36
         versionCode = 1
@@ -24,10 +24,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
     compileOptions {
@@ -43,18 +40,17 @@ android {
     androidResources {
         noCompress += listOf("onnx", "ckpt")
     }
-
     packaging {
         jniLibs.pickFirsts.add("lib/**/libonnxruntime.so")
         jniLibs.pickFirsts.add("lib/**/libonnxruntime_training.so")
     }
 }
 
-
 dependencies {
-    // ONNX Runtime for on-device training (includes inference capabilities)
+    // ONNX
     implementation("com.microsoft.onnxruntime:onnxruntime-training-android:1.19.2")
 
+    // Android & Compose
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
@@ -66,11 +62,12 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.runtime:runtime-livedata")
 
-    // Firebase
+    // Firebase (UPDATED)
     implementation(platform("com.google.firebase:firebase-bom:33.0.0"))
     implementation("com.google.firebase:firebase-database-ktx")
+    implementation("com.google.firebase:firebase-auth-ktx") // Added Auth
     implementation("com.google.firebase:firebase-common-ktx")
-    implementation("com.google.firebase:firebase-storage-ktx") // For model backup
+    implementation("com.google.firebase:firebase-storage-ktx")
 
     // Room
     implementation("androidx.room:room-runtime:2.6.1")
@@ -80,6 +77,7 @@ dependencies {
     // WorkManager
     implementation("androidx.work:work-runtime-ktx:2.9.0")
 
+    // Testing
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

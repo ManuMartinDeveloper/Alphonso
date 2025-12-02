@@ -1,10 +1,9 @@
-package com.manumartin
+package com.alphonso
 
 import android.accessibilityservice.AccessibilityService
 import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Context
-import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.graphics.Rect
@@ -18,7 +17,6 @@ import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Toast
-import androidx.core.graphics.scale
 import androidx.room.Room
 import com.google.firebase.database.DataSnapshot
 import com.google.firebase.database.DatabaseError
@@ -627,7 +625,11 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
 
     private fun logToFirebase(label: String, confidence: Float) {
         val entry = mapOf("timestamp" to System.currentTimeMillis(), "label" to label, "confidence" to confidence)
-        firebaseDb?.getReference("incidents")?.push()?.setValue(entry)
+        // Writes only to THIS user's list
+        val uid = FirebaseAuth.getInstance().currentUser?.uid
+        if (uid != null) {
+            firebaseDb?.getReference("users/$uid/incidents")?.push()?.setValue(entry)
+        }
     }
 
     private fun preprocessBitmap(bitmap: Bitmap): FloatBuffer {

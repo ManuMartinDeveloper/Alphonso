@@ -1,4 +1,4 @@
-package com.manumartin.ui.theme
+package com.alphonso.ui.theme
 
 import androidx.compose.ui.graphics.Color
 

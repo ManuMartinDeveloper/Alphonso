@@ -1,4 +1,4 @@
-package com.manumartin
+package com.alphonso
 
 import android.content.Context
 import android.graphics.Bitmap
