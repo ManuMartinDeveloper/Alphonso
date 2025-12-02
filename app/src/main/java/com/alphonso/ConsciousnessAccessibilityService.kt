@@ -18,6 +18,7 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Toast
 import androidx.room.Room
+import com.google.firebase.auth.FirebaseAuth // <--- THIS WAS MISSING
 import com.google.firebase.database.DataSnapshot
 import com.google.firebase.database.DatabaseError
 import com.google.firebase.database.FirebaseDatabase
@@ -54,21 +55,21 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     private var remoteDisabledUntil = 0L
     private var censorGloballyDisabled = false
     private var isGlobalLockoutActive = false
-    
+
     // --- VARIABLES TO ADD TO YOUR CLASS ---
-    
+
     // 1. The list of bad words (Synced from Firebase, but defaults here)
     private val defaultBlocklist = setOf(
-        "pornhub", "xvideos", "xnxx", "chaturbate", "redtube", 
-        "youporn", "xhamster", "brazzers", "adultfriendfinder", 
+        "pornhub", "xvideos", "xnxx", "chaturbate", "redtube",
+        "youporn", "xhamster", "brazzers", "adultfriendfinder",
         "nude", "porn", "sexy", "xxx", "hentai"
     )
     private val blocklist = mutableListOf<String>().apply { addAll(defaultBlocklist) }
 
     // 2. Browsers where we specifically check the URL bar first (Optimization)
     private val browserPackages = setOf(
-        "com.android.chrome", 
-        "org.mozilla.firefox", 
+        "com.android.chrome",
+        "org.mozilla.firefox",
         "com.duckduckgo.mobile.android",
         "com.microsoft.emmx" // Edge
     )
@@ -194,41 +195,25 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         })
     }
 
-    /**
-     * Resizes the image to fit within target dimensions while maintaining aspect ratio.
-     * Fills the empty space with black (Letterboxing).
-     */
     private fun resizeWithPadding(original: Bitmap, targetWidth: Int, targetHeight: Int): Bitmap {
         val background = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
         val canvas = android.graphics.Canvas(background)
-
-        // Fill background with Black (matches NudeNet/YOLO training data padding)
         canvas.drawColor(android.graphics.Color.BLACK)
-
         val originalWidth = original.width.toFloat()
         val originalHeight = original.height.toFloat()
-
-        // Calculate scale to fit the image inside the box
         val scale = kotlin.math.min(targetWidth / originalWidth, targetHeight / originalHeight)
-
         val newWidth = originalWidth * scale
         val newHeight = originalHeight * scale
-
-        // Center the image
         val x = (targetWidth - newWidth) / 2
         val y = (targetHeight - newHeight) / 2
-
         val matrix = android.graphics.Matrix()
         matrix.setScale(scale, scale)
         matrix.postTranslate(x, y)
-
         val paint = android.graphics.Paint()
         paint.isFilterBitmap = true
         canvas.drawBitmap(original, matrix, paint)
-
         return background
     }
-
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
@@ -295,7 +280,6 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                     return@launch
                 }
 
-                // 1. Resize with padding (Letterboxing)
                 val resized = resizeWithPadding(bitmap, 320, 320)
                 val floatBuffer = preprocessBitmap(resized)
 
@@ -307,12 +291,9 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
 
                     if (output != null) {
                         val allDetectedBoxes = mutableListOf<Rect>()
-
-                        // Variables to track the "worst" thing found in this frame
                         var highConfidenceTrigger: Pair<String, Float>? = null
                         var bestCandidate: Pair<String, Float>? = null
 
-                        // --- COORDINATE CORRECTION CALCULATION ---
                         val screenWidth = bitmap.width.toFloat()
                         val screenHeight = bitmap.height.toFloat()
                         val targetDim = 320f
@@ -324,26 +305,21 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                             var maxScore = 0f
                             var classIndex = -1
 
-                            // Find the best class for this specific box
                             for (c in 0 until 18) {
                                 val score = output[c + 4][i]
                                 if (score > maxScore) { maxScore = score; classIndex = c }
                             }
 
-                            // Skip if it's not a sensitive body part
                             if (!SENSITIVE_INDICES.contains(classIndex)) continue
 
-                            // Get the threshold for this specific body part
                             val actionThreshold = labelThresholds[classIndex] ?: defaultThreshold
 
-                            // Only calculate geometry if it passes the "Logging" threshold
                             if (maxScore > lowConfidenceLogThreshold) {
                                 val cx = output[0][i]
                                 val cy = output[1][i]
                                 val w = output[2][i]
                                 val h = output[3][i]
 
-                                // --- UN-MAP COORDINATES (Math to fix the "Placing" issue) ---
                                 val realCx = (cx - offsetX) / scale
                                 val realCy = (cy - offsetY) / scale
                                 val realW = w / scale
@@ -354,18 +330,13 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                                 val right = (realCx + realW / 2).toInt()
                                 val bottom = (realCy + realH / 2).toInt()
 
-                                // CHECK: Is this a STRIKE or just a CANDIDATE?
                                 if (maxScore > actionThreshold) {
                                     allDetectedBoxes.add(Rect(left, top, right, bottom))
-
                                     val label = ALL_CLASSES.getOrElse(classIndex) { "Unknown" }
-
-                                    // Track the highest confidence strike to report it
                                     if (highConfidenceTrigger == null || maxScore > highConfidenceTrigger!!.second) {
                                         highConfidenceTrigger = Pair(label, maxScore)
                                     }
                                 } else {
-                                    // Just a candidate (for logs only)
                                     val label = ALL_CLASSES.getOrElse(classIndex) { "Unknown" }
                                     if (bestCandidate == null || maxScore > bestCandidate!!.second) {
                                         bestCandidate = Pair(label, maxScore)
@@ -374,29 +345,23 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                             }
                         }
 
-                        // --- UI & LOGIC UPDATE (Main Thread) ---
                         withContext(Dispatchers.Main) {
                             if (isGlobalLockoutActive) {
                                 censorView?.triggerLockdown()
                             } else if (censorGloballyDisabled) {
                                 censorView?.clear()
                             } else if (allDetectedBoxes.isNotEmpty()) {
-                                // Pass the bitmap to CensorView so it can create the blur
                                 censorView?.censorAreas(allDetectedBoxes, bitmap)
                             } else {
                                 censorView?.clear()
                             }
 
-                            // --- WARNING LOGIC (The part that was missing) ---
                             if (allDetectedBoxes.isNotEmpty()) {
-                                // If we have a strike, punish the user
                                 highConfidenceTrigger?.let {
                                     handleDetections(it.first, it.second)
                                 }
                             } else {
-                                // No strike, but maybe log the candidate
                                 bestCandidate?.let {
-                                    // Launch back into background to save to DB
                                     inferenceScope.launch {
                                         logEvent(LogEventType.AI_CANDIDATE, "Candidate: ${it.first}", it.second)
                                     }
@@ -406,16 +371,13 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                     }
                 }
 
-                // Cleanup
                 inputTensor.close()
                 resized.recycle()
-
-                // --- CRITICAL FIX: Recycle the original bitmap to prevent OutOfMemory ---
                 bitmap.recycle()
 
             } catch (e: Exception) {
                 Log.e(TAG, "Inference Failed", e)
-                bitmap.recycle() // Recycle even if it fails!
+                bitmap.recycle()
             }
         }
     }
@@ -461,7 +423,6 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
             dpm.setApplicationHidden(adminComponent, packageName, true)
         } catch (e: SecurityException) {
             Log.e(TAG, "Not device owner, cannot hide application")
-            // Fallback to old method
             isLockedOut = true
             lockedOutPackage = packageName
         }
@@ -488,13 +449,9 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         }
     }
 
-    // --- MAIN EVENT LISTENER ---
-
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Basic checks: Is event null? Is remote disable active? Is lockdown active?
         if (event == null || System.currentTimeMillis() < remoteDisabledUntil || isGlobalLockoutActive) return
 
-        // If we are already locked out, enforce it and stop checking text
         if (isLockedOut && lockedOutPackage != null) {
             if (event.packageName?.toString() == lockedOutPackage) {
                 performGlobalAction(GLOBAL_ACTION_HOME)
@@ -502,31 +459,22 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
             }
         }
 
-        // MAIN LOGIC: Check for Bad Text
         if (!isLockedOut) {
             val packageName = event.packageName?.toString() ?: return
-            
-            // Strategy A: Targeted Browser Check (Fast & Accurate)
-            // If we are in a known browser, look specifically for the URL bar ID first.
+
             if (browserPackages.contains(packageName)) {
-                 val rootNode = rootInActiveWindow ?: return
-                 val urlBarText = findUrlBarText(rootNode)
-                 
-                 // If we found a URL and it contains bad words -> BLOCK
-                 if (urlBarText != null && checkAndBlock(urlBarText, packageName)) {
-                     return 
-                 }
+                val rootNode = rootInActiveWindow ?: return
+                val urlBarText = findUrlBarText(rootNode)
+
+                if (urlBarText != null && checkAndBlock(urlBarText, packageName)) {
+                    return
+                }
             }
 
-            // Strategy B: Generic Screen Scan (Fallback)
-            // If it's not a browser OR if Strategy A didn't find anything, scan EVERYTHING.
-            // We skip SystemUI (status bar/notification shade) to prevent lag.
             if (!packageName.contains("com.android.systemui")) {
                 val rootNode = rootInActiveWindow ?: return
-                
-                // Recursively get ALL text on the screen
                 val allText = getAllTextFromNode(rootNode).joinToString(" ").lowercase()
-                
+
                 if (allText.isNotEmpty()) {
                     checkAndBlock(allText, packageName)
                 }
@@ -534,68 +482,37 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         }
     }
 
-    // --- HELPER FUNCTIONS ---
-
-    /**
-     * Checks if the text contains any word from the blocklist.
-     * If yes: Logs it, Shows Toast, Presses BACK, and Presses HOME.
-     */
     private fun checkAndBlock(text: String, packageName: String): Boolean {
-        // 1. Convert everything to lowercase once for speed
         val lowerText = text.lowercase()
 
         for (keyword in blocklist) {
-            // 2. Create a "Whole Word" Regex for the current keyword
-            //    \b = Word Boundary (matches spaces, tabs, punctuation, start/end of line)
-            //    Regex.escape(keyword) = Safety check. If a user adds a keyword like "c++",
-            //    this ensures the "+" is treated as a letter, not a regex command.
             val regex = Regex("\\b${Regex.escape(keyword)}\\b")
 
-            // 3. Check if the regex finds a match in the text
             if (regex.containsMatchIn(lowerText)) {
                 Log.w(TAG, "BLOCKED TEXT: '$keyword' in $packageName")
-
-                // --- ACTION TAKEN ---
-
-                // A. Notify User
                 Toast.makeText(this, "Restricted Content: $keyword", Toast.LENGTH_SHORT).show()
-
-                // B. Instant Ejection: Go Back (close popup/tab) -> Go Home (hide app)
                 performGlobalAction(GLOBAL_ACTION_BACK)
                 performGlobalAction(GLOBAL_ACTION_HOME)
-
-                // C. Log the incident to your Room Database & Firebase
                 inferenceScope.launch {
                     logEvent(LogEventType.APP_BLOCKED, "Text Block: $keyword", 1.0f)
                 }
-
-                return true // Stop checking other words, we already found one.
+                return true
             }
         }
         return false
     }
 
-    /**
-     * recursively traverses the Accessibility Node tree to extract all visible text.
-     */
     private fun getAllTextFromNode(node: AccessibilityNodeInfo?): List<String> {
         if (node == null) return emptyList()
         val textList = mutableListOf<String>()
-        
-        // Grab text or content description (often used for images/buttons)
         node.text?.let { textList.add(it.toString()) }
         node.contentDescription?.let { textList.add(it.toString()) }
-        
-        // Recursively check children
         for (i in 0 until node.childCount) {
             textList.addAll(getAllTextFromNode(node.getChild(i)))
         }
         return textList
     }
 
-    /**
-     * Optimization: Looks for specific View IDs known to be URL bars in major browsers.
-     */
     private fun findUrlBarText(nodeInfo: AccessibilityNodeInfo): String? {
         val browserUrlBarIds = listOf(
             "com.android.chrome:id/url_bar",
@@ -603,9 +520,8 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
             "com.duckduckgo.mobile.android:id/omnibarTextInput",
             "com.microsoft.emmx:id/url_bar"
         )
-        
+
         for (id in browserUrlBarIds) {
-            // This is very fast compared to scanning the whole tree
             val nodes = nodeInfo.findAccessibilityNodeInfosByViewId(id)
             if (nodes != null && nodes.isNotEmpty()) {
                 return nodes[0].text?.toString()
@@ -625,7 +541,6 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
 
     private fun logToFirebase(label: String, confidence: Float) {
         val entry = mapOf("timestamp" to System.currentTimeMillis(), "label" to label, "confidence" to confidence)
-        // Writes only to THIS user's list
         val uid = FirebaseAuth.getInstance().currentUser?.uid
         if (uid != null) {
             firebaseDb?.getReference("users/$uid/incidents")?.push()?.setValue(entry)

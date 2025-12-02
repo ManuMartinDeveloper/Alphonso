@@ -46,7 +46,8 @@ interface EventLogDao {
 }
 
 // 4. The Database
-@Database(entities = [EventLogEntity::class], version = 1)
+// FIX: Added 'exportSchema = false' to resolve the build error
+@Database(entities = [EventLogEntity::class], version = 1, exportSchema = false)
 abstract class EventLogDatabase : RoomDatabase() {
     abstract fun eventLogDao(): EventLogDao
 }
