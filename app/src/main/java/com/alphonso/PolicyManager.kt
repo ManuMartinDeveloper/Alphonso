@@ -14,13 +14,14 @@ object PolicyManager {
         val adminComponent = ComponentName(context, ConsciousnessDeviceAdminReceiver::class.java)
         val accessibilityService = ComponentName(context, ConsciousnessAccessibilityService::class.java)
 
+        // 1. Safety Check: We can only do this if we are Device Owner
         if (!dpm.isDeviceOwnerApp(context.packageName)) {
             Log.e("AlphonsoPolicy", "Not Device Owner - Cannot enforce policies")
             return
         }
 
         try {
-            // --- 1. FORCE ACCESSIBILITY ON ---
+            // --- STEP A: FORCE ACCESSIBILITY ON ---
             val currentServices = Settings.Secure.getString(
                 context.contentResolver,
                 Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
@@ -28,37 +29,33 @@ object PolicyManager {
 
             val serviceString = accessibilityService.flattenToString()
 
+            // If our service is not in the list, ADD IT.
             if (!currentServices.contains(serviceString)) {
                 val newServices = if (currentServices.isEmpty()) serviceString else "$currentServices:$serviceString"
+
                 dpm.setSecureSetting(
                     adminComponent,
                     Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
                     newServices
                 )
+                Log.i("AlphonsoPolicy", "Forced Accessibility Service ON")
             }
 
+            // Force the Master Switch ON
             dpm.setSecureSetting(
                 adminComponent,
                 Settings.Secure.ACCESSIBILITY_ENABLED,
                 "1"
             )
 
-            // --- 2. FORCE ALWAYS-ON VPN (Fixes Boot Crash) ---
-            // This grants VPN permission automatically and restarts it if it dies.
-            try {
-                if (dpm.getAlwaysOnVpnPackage(adminComponent) != context.packageName) {
-                    dpm.setAlwaysOnVpnPackage(adminComponent, context.packageName, true)
-                    Log.i("AlphonsoPolicy", "Always-On VPN set to Alphonso")
-                }
-            } catch (e: Exception) {
-                Log.e("AlphonsoPolicy", "Failed to set Always-On VPN", e)
-            }
-
-            // --- 3. LOCKDOWN ---
+            // --- STEP B: PREVENT TURNING IT OFF ---
+            // 1. Block the user from "Force Stopping" or "Clearing Data"
             dpm.addUserRestriction(adminComponent, UserManager.DISALLOW_APPS_CONTROL)
+
+            // 2. Block Uninstallation
             dpm.setUninstallBlocked(adminComponent, context.packageName, true)
 
-            Log.i("AlphonsoPolicy", "Policies Enforced Successfully")
+            Log.i("AlphonsoPolicy", "Enforced: App cannot be stopped or uninstalled")
 
         } catch (e: Exception) {
             Log.e("AlphonsoPolicy", "Failed to enforce policies", e)

@@ -4,11 +4,11 @@ import androidx.room.*
 
 // 1. The Enum
 enum class LogEventType {
-    DETECTION,      // AI found something (High confidence - no longer used, replaced by WARNING)
+    DETECTION,      // AI found something
     WARNING,        // User warned (Strike)
     APP_BLOCKED,    // App locked down
-    AI_CANDIDATE,   // AI found something with low confidence (for logging only)
-    APP_RELEASED,   // User left app (Not currently used)
+    AI_CANDIDATE,   // Low confidence detection
+    APP_RELEASED,   // (Unused)
     FALSE_POSITIVE, // User flagged mistake
     RETRAINING,     // System updated weights
     SERVICE_EVENT   // Service started/stopped
@@ -38,6 +38,7 @@ interface EventLogDao {
     @Query("DELETE FROM event_logs")
     suspend fun clearAll()
 
+    // --- FIX: Added these missing methods back ---
     @Query("UPDATE event_logs SET isFalsePositive = 1 WHERE id = :id")
     suspend fun markAsFalsePositive(id: Int)
 
@@ -46,7 +47,7 @@ interface EventLogDao {
 }
 
 // 4. The Database
-// FIX: Added 'exportSchema = false' to resolve the build error
+// Note: exportSchema = false fixes the other build error you saw previously
 @Database(entities = [EventLogEntity::class], version = 1, exportSchema = false)
 abstract class EventLogDatabase : RoomDatabase() {
     abstract fun eventLogDao(): EventLogDao
