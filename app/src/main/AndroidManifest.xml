@@ -45,7 +45,7 @@
         </service>
 
         <receiver
-            android:name=".DeviceAdminReceiver"
+            android:name=".ConsciousnessDeviceAdminReceiver"
             android:permission="android.permission.BIND_DEVICE_ADMIN"
             android:exported="true">
             <meta-data

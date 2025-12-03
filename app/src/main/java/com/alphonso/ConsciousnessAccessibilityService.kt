@@ -95,7 +95,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         Log.i(TAG, ">>> SERVICE STARTED <<<")
         tts = TextToSpeech(this, this)
         dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
-        adminComponent = ComponentName(this, DeviceAdminReceiver::class.java)
+        adminComponent = ComponentName(this, ConsciousnessDeviceAdminReceiver::class.java)
 
         try {
             firebaseDb = FirebaseDatabase.getInstance()
