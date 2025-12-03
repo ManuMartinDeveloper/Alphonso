@@ -95,7 +95,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         Log.i(TAG, ">>> SERVICE STARTED <<<")
         tts = TextToSpeech(this, this)
         dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
-        adminComponent = ComponentName(this, ConsciousnessDeviceAdminReceiver::class.java)
+        adminComponent = ComponentName(this, DeviceAdminReceiver::class.java)
 
         try {
             firebaseDb = FirebaseDatabase.getInstance()
@@ -122,7 +122,9 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         dbRef.child("remote_settings/censor_globally_disabled").addValueEventListener(object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
                 censorGloballyDisabled = snapshot.getValue(Boolean::class.java) ?: false
-                if (censorGloballyDisabled) GlobalScope.launch(Dispatchers.Main) { censorView?.clear() }
+                if (censorGloballyDisabled) {
+                    mainExecutor.execute { censorView?.clear() }
+                }
             }
             override fun onCancelled(error: DatabaseError) {}
         })
@@ -268,23 +270,32 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     private fun initiateLockdown(reason: String, confidence: Float, packageName: String) {
         if (isLockedOut) return
 
-        // Log the lockdown event
         logEvent(LogEventType.APP_BLOCKED, reason, confidence, packageName)
 
-        try { dpm.setApplicationHidden(adminComponent, packageName, true) }
-        catch (e: SecurityException) { isLockedOut = true; lockedOutPackage = packageName }
+        try {
+            dpm.setApplicationHidden(adminComponent, packageName, true)
+            isLockedOut = true
+            lockedOutPackage = packageName
+            strikeCount = 0
+            censorView?.clear()
+            speakPrayer()
+            performGlobalAction(GLOBAL_ACTION_HOME)
 
-        strikeCount = 0
-        censorView?.clear()
-        speakPrayer()
-        performGlobalAction(GLOBAL_ACTION_HOME)
-
-        GlobalScope.launch(Dispatchers.Main) {
-            delay(lockoutDurationMinutes * 60 * 1000)
-            try { dpm.setApplicationHidden(adminComponent, packageName, false) }
-            catch (e: SecurityException) { isLockedOut = false; lockedOutPackage = null }
-            // Log the release event
-            logEvent(LogEventType.APP_RELEASED, "Lockdown ended", 0f, packageName)
+            // Use the service's own scope to schedule the release
+            inferenceScope.launch {
+                delay(lockoutDurationMinutes * 60 * 1000)
+                try {
+                    dpm.setApplicationHidden(adminComponent, packageName, false)
+                } catch (e: SecurityException) {
+                    Log.e(TAG, "Failed to unhide application after lockdown for $packageName", e)
+                } finally {
+                    isLockedOut = false
+                    lockedOutPackage = null
+                    logEvent(LogEventType.APP_RELEASED, "Lockdown ended", 0f, packageName)
+                }
+            }
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Failed to hide application to initiate lockdown for $packageName", e)
         }
     }
 
@@ -392,6 +403,8 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     override fun onDestroy() {
         tts?.shutdown()
         try { windowManager?.removeView(censorView) } catch (_: Exception) {}
+        screenCaptureScope.cancel()
+        inferenceScope.cancel()
         super.onDestroy()
     }
 }

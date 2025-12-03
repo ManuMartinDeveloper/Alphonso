@@ -14,7 +14,7 @@ object PolicyManager {
 
     fun enforcePolicies(context: Context) {
         val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
-        val adminComponent = ComponentName(context, ConsciousnessDeviceAdminReceiver::class.java)
+        val adminComponent = ComponentName(context, DeviceAdminReceiver::class.java)
 
         if (!dpm.isDeviceOwnerApp(context.packageName)) {
             Log.e("AlphonsoPolicy", "ERROR: Not Device Owner. Cannot enforce.")

@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
+import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.database.FirebaseDatabase
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.tasks.await
@@ -30,37 +31,43 @@ class NightlyBatchWorker(
             setProgress(workDataOf(KEY_PROGRESS to "Initializing..."))
             Log.d(TAG, "Nightly batch job started")
 
-            val firebase = FirebaseDatabase.getInstance("https://alphonso-c7f69-default-rtdb.asia-southeast1.firebasedatabase.app")
-            val incidentsRef = firebase.getReference("incidents")
-            val historyRef = firebase.getReference("retraining_history")
+            val auth = FirebaseAuth.getInstance()
+            val uid = auth.currentUser?.uid
+            if (uid == null) {
+                Log.w(TAG, "No user logged in, skipping nightly job.")
+                return@withContext Result.success()
+            }
+
+            val firebase = FirebaseDatabase.getInstance()
+            val incidentsRef = firebase.getReference("users/$uid/incidents")
+            val historyRef = firebase.getReference("users/$uid/retraining_history")
 
             val snapshot = incidentsRef.get().await()
             val incidentCount = snapshot.childrenCount
 
             if (incidentCount == 0L) {
-                setProgress(workDataOf(KEY_PROGRESS to "No data to train"))
+                setProgress(workDataOf(KEY_PROGRESS to "No new incidents to process."))
+                Log.d(TAG, "No new incidents to process.")
                 return@withContext Result.success()
             }
 
-            Log.d(TAG, "Retraining on $incidentCount items...")
-            for (i in 1..10) {
-                Thread.sleep(300)
-                setProgress(workDataOf(KEY_PROGRESS to "Retraining: ${i * 10}%"))
-            }
+            Log.d(TAG, "Processing $incidentCount incidents...")
+            // NOTE: Actual processing logic would go here.
+            // This worker will now only log that it ran and will NOT delete data.
 
             val historyEntry = mapOf(
                 "timestamp" to System.currentTimeMillis(),
                 "date" to SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date()),
                 "items_processed" to incidentCount,
-                "status" to "SUCCESS"
+                "status" to "SUCCESS (Dry Run - Data not deleted)"
             )
             historyRef.push().setValue(historyEntry).await()
-            incidentsRef.removeValue().await()
 
+            Log.i(TAG, "Nightly batch job finished. Processed $incidentCount incidents.")
             return@withContext Result.success()
 
         } catch (e: Exception) {
-            Log.e(TAG, "Training failed", e)
+            Log.e(TAG, "Nightly batch job failed", e)
             return@withContext Result.failure()
         }
     }
