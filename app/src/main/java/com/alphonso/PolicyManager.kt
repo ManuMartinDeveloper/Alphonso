@@ -1,3 +1,4 @@
+// Updated PolicyManager.kt
 package com.alphonso
 
 import android.app.admin.DevicePolicyManager
@@ -9,53 +10,44 @@ import android.util.Log
 
 object PolicyManager {
 
-    // Cloudflare Zero Trust / Family DNS Endpoint
     private const val CLOUDFLARE_DOT_HOSTNAME = "3d1e280bon.cloudflare-gateway.com"
 
     fun enforcePolicies(context: Context) {
         val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
         val adminComponent = ComponentName(context, ConsciousnessDeviceAdminReceiver::class.java)
 
-        // Safety Check
         if (!dpm.isDeviceOwnerApp(context.packageName)) {
-            Log.e("AlphonsoPolicy", "Not Device Owner - Cannot enforce policies")
+            Log.e("AlphonsoPolicy", "ERROR: Not Device Owner. Cannot enforce.")
             return
         }
 
         try {
-            // --- 1. ACCESSIBILITY PROTECTION (New Method) ---
-            // Instead of forcing the switch (which crashes on Android 12+),
-            // we set the "Permitted List". This locks the configuration.
-
-            // Allow ONLY our service (and system services)
-            val allowedServices = listOf(context.packageName)
-            dpm.setPermittedAccessibilityServices(adminComponent, allowedServices)
-
-            // Note: The user still has to turn it on ONCE manually.
-            // But once on, 'DISALLOW_APPS_CONTROL' makes it hard to kill.
-
-            // --- 2. FORCE NATIVE DNS ---
-            try {
-                dpm.setGlobalPrivateDnsModeSpecifiedHost(adminComponent, CLOUDFLARE_DOT_HOSTNAME)
-                Log.i("AlphonsoPolicy", "DNS Locked to: $CLOUDFLARE_DOT_HOSTNAME")
-            } catch (e: SecurityException) {
-                Log.e("AlphonsoPolicy", "DNS Security Error", e)
-            }
-
-            // --- 3. LOCKDOWN ---
-            // Prevent changing DNS manually
-            dpm.addUserRestriction(adminComponent, UserManager.DISALLOW_CONFIG_PRIVATE_DNS)
-
-            // Prevent Force Stop / Clear Data (This keeps the service alive)
+            // 1. Prevent Uninstall / Force Stop
+            dpm.setUninstallBlocked(adminComponent, context.packageName, true)
             dpm.addUserRestriction(adminComponent, UserManager.DISALLOW_APPS_CONTROL)
 
-            // Prevent Uninstall
-            dpm.setUninstallBlocked(adminComponent, context.packageName, true)
+            // 2. Lock DNS (System Level)
+            // Checks if it's already set to avoid system lag
+            val currentDns = dpm.getGlobalPrivateDnsMode(adminComponent)
+            if (currentDns != DevicePolicyManager.PRIVATE_DNS_MODE_PROVIDER_HOSTNAME) {
+                dpm.setGlobalPrivateDnsModeSpecifiedHost(adminComponent, CLOUDFLARE_DOT_HOSTNAME)
+            }
+            dpm.addUserRestriction(adminComponent, UserManager.DISALLOW_CONFIG_PRIVATE_DNS)
 
-            Log.i("AlphonsoPolicy", "Policies Enforced")
+            // 3. FORCE-ENABLE ACCESSIBILITY (The "God Mode" Fix)
+            val serviceComponent = "${context.packageName}/.ConsciousnessAccessibilityService"
+
+            // Allow our service
+            dpm.setPermittedAccessibilityServices(adminComponent, listOf(context.packageName))
+
+            // Force turn it ON
+            dpm.setSecureSetting(adminComponent, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, serviceComponent)
+            dpm.setSecureSetting(adminComponent, Settings.Secure.ACCESSIBILITY_ENABLED, "1")
+
+            Log.i("AlphonsoPolicy", "All Policies Enforced Successfully")
 
         } catch (e: Exception) {
-            Log.e("AlphonsoPolicy", "Critical Failure enforcing policies", e)
+            Log.e("AlphonsoPolicy", "Policy Enforcement Failed", e)
         }
     }
 }

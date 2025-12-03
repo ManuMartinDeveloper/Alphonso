@@ -103,6 +103,8 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         } catch (e: Exception) { Log.e(TAG, "Firebase Init Failed", e) }
 
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+
+        // Initialize Room Database for Local Logging
         val db = Room.databaseBuilder(applicationContext, EventLogDatabase::class.java, "event-log-database").build()
         eventLogDao = db.eventLogDao()
 
@@ -245,23 +247,34 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         if (isCurrentlySpeaking) return
         if (isLockedOut) return
 
+        val detectedPackage = rootInActiveWindow?.packageName?.toString() ?: "unknown"
+
+        // --- SAFEGUARD: Skip detection if we are in the Alphonso app itself ---
+        if (detectedPackage == applicationContext.packageName) return
+
         strikeCount++
         Toast.makeText(this, "Strike $strikeCount: $label", Toast.LENGTH_SHORT).show()
-        logToFirebase(label, confidence)
+
+        // Log to DB and Firebase
+        logEvent(LogEventType.DETECTION, label, confidence, detectedPackage)
+
         speakPrayer()
 
         if (strikeCount >= strikeLimit) {
-            initiateLockdown("Strike Limit Reached: $label", confidence, rootInActiveWindow?.packageName?.toString() ?: "unknown")
+            initiateLockdown("Strike Limit Reached: $label", confidence, detectedPackage)
         }
     }
 
     private fun initiateLockdown(reason: String, confidence: Float, packageName: String) {
         if (isLockedOut) return
+
+        // Log the lockdown event
+        logEvent(LogEventType.APP_BLOCKED, reason, confidence, packageName)
+
         try { dpm.setApplicationHidden(adminComponent, packageName, true) }
         catch (e: SecurityException) { isLockedOut = true; lockedOutPackage = packageName }
 
         strikeCount = 0
-        logToFirebase("LOCKDOWN: $packageName", confidence)
         censorView?.clear()
         speakPrayer()
         performGlobalAction(GLOBAL_ACTION_HOME)
@@ -270,14 +283,20 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
             delay(lockoutDurationMinutes * 60 * 1000)
             try { dpm.setApplicationHidden(adminComponent, packageName, false) }
             catch (e: SecurityException) { isLockedOut = false; lockedOutPackage = null }
+            // Log the release event
+            logEvent(LogEventType.APP_RELEASED, "Lockdown ended", 0f, packageName)
         }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null || isLockedOut) return
 
-        // Text Scanning Logic
         val packageName = event.packageName?.toString() ?: return
+
+        // --- SAFEGUARD: Skip text scanning if we are in the Alphonso app ---
+        // This prevents the app from closing when viewing logs containing blocked words.
+        if (packageName == applicationContext.packageName) return
+
         if (browserPackages.contains(packageName) || !packageName.contains("systemui")) {
             val rootNode = rootInActiveWindow ?: return
             val allText = getAllTextFromNode(rootNode).joinToString(" ").lowercase()
@@ -286,7 +305,10 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                 if (allText.contains(keyword)) {
                     performGlobalAction(GLOBAL_ACTION_BACK)
                     performGlobalAction(GLOBAL_ACTION_HOME)
-                    logToFirebase("Text Block: $keyword", 1.0f)
+
+                    // Log the text blocking event
+                    logEvent(LogEventType.DETECTION, "Text Block: $keyword", 1.0f, packageName)
+
                     Toast.makeText(this, "Blocked: $keyword", Toast.LENGTH_SHORT).show()
                     return
                 }
@@ -306,10 +328,38 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         if (isTtsReady) tts?.speak(prayerText, TextToSpeech.QUEUE_FLUSH, null, "prayer")
     }
 
-    private fun logToFirebase(label: String, confidence: Float) {
-        val uid = auth.currentUser?.uid ?: return
-        val entry = mapOf("timestamp" to System.currentTimeMillis(), "label" to label, "confidence" to confidence)
-        firebaseDb?.getReference("users/$uid/incidents")?.push()?.setValue(entry)
+    // --- NEW: Unified Logging (Firebase + Local Database) ---
+    private fun logEvent(type: LogEventType, details: String, confidence: Float, packageName: String) {
+        val timestamp = System.currentTimeMillis()
+
+        // 1. Log to Firebase
+        val uid = auth.currentUser?.uid
+        if (uid != null) {
+            val entry = mapOf(
+                "timestamp" to timestamp,
+                "type" to type.name,
+                "label" to details,
+                "confidence" to confidence,
+                "packageName" to packageName
+            )
+            firebaseDb?.getReference("users/$uid/incidents")?.push()?.setValue(entry)
+        }
+
+        // 2. Log to Local Room Database
+        inferenceScope.launch {
+            try {
+                eventLogDao.insert(EventLogEntity(
+                    timestamp = timestamp,
+                    eventType = type.name,
+                    packageName = packageName,
+                    details = details,
+                    confidenceScore = confidence,
+                    isFalsePositive = false
+                ))
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to log event locally", e)
+            }
+        }
     }
 
     private fun resizeWithPadding(original: Bitmap, w: Int, h: Int): Bitmap {
