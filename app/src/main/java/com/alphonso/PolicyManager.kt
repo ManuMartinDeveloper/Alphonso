@@ -1,4 +1,3 @@
-// Updated PolicyManager.kt
 package com.alphonso
 
 import android.app.admin.DevicePolicyManager
@@ -14,7 +13,9 @@ object PolicyManager {
 
     fun enforcePolicies(context: Context) {
         val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
-        val adminComponent = ComponentName(context, DeviceAdminReceiver::class.java)
+
+        // FIX: Ensure this matches the class name in your Manifest exactly
+        val adminComponent = ComponentName(context, ConsciousnessDeviceAdminReceiver::class.java)
 
         if (!dpm.isDeviceOwnerApp(context.packageName)) {
             Log.e("AlphonsoPolicy", "ERROR: Not Device Owner. Cannot enforce.")
@@ -22,25 +23,20 @@ object PolicyManager {
         }
 
         try {
-            // 1. Prevent Uninstall / Force Stop
+            // 1. Prevent Uninstall
             dpm.setUninstallBlocked(adminComponent, context.packageName, true)
             dpm.addUserRestriction(adminComponent, UserManager.DISALLOW_APPS_CONTROL)
 
-            // 2. Lock DNS (System Level)
-            // Checks if it's already set to avoid system lag
+            // 2. Lock DNS
             val currentDns = dpm.getGlobalPrivateDnsMode(adminComponent)
             if (currentDns != DevicePolicyManager.PRIVATE_DNS_MODE_PROVIDER_HOSTNAME) {
                 dpm.setGlobalPrivateDnsModeSpecifiedHost(adminComponent, CLOUDFLARE_DOT_HOSTNAME)
             }
             dpm.addUserRestriction(adminComponent, UserManager.DISALLOW_CONFIG_PRIVATE_DNS)
 
-            // 3. FORCE-ENABLE ACCESSIBILITY (The "God Mode" Fix)
+            // 3. Force Accessibility
             val serviceComponent = "${context.packageName}/.ConsciousnessAccessibilityService"
-
-            // Allow our service
             dpm.setPermittedAccessibilityServices(adminComponent, listOf(context.packageName))
-
-            // Force turn it ON
             dpm.setSecureSetting(adminComponent, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, serviceComponent)
             dpm.setSecureSetting(adminComponent, Settings.Secure.ACCESSIBILITY_ENABLED, "1")
 
