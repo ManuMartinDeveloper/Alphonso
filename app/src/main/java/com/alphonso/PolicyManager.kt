@@ -4,7 +4,6 @@ import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Context
 import android.os.UserManager
-import android.provider.Settings
 import android.util.Log
 
 object PolicyManager {
@@ -13,8 +12,6 @@ object PolicyManager {
 
     fun enforcePolicies(context: Context) {
         val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
-
-        // FIX: Ensure this matches the class name in your Manifest exactly
         val adminComponent = ComponentName(context, ConsciousnessDeviceAdminReceiver::class.java)
 
         if (!dpm.isDeviceOwnerApp(context.packageName)) {
@@ -23,22 +20,25 @@ object PolicyManager {
         }
 
         try {
-            // 1. Prevent Uninstall
+            // 1. Prevent Uninstall & App Control
             dpm.setUninstallBlocked(adminComponent, context.packageName, true)
             dpm.addUserRestriction(adminComponent, UserManager.DISALLOW_APPS_CONTROL)
+            // Optional: Prevent user from clearing data or force-stopping
+            // dpm.addUserRestriction(adminComponent, UserManager.DISALLOW_DEBUGGING_FEATURES)
 
-            // 2. Lock DNS
+            // 2. Lock DNS (Network Filter)
             val currentDns = dpm.getGlobalPrivateDnsMode(adminComponent)
             if (currentDns != DevicePolicyManager.PRIVATE_DNS_MODE_PROVIDER_HOSTNAME) {
                 dpm.setGlobalPrivateDnsModeSpecifiedHost(adminComponent, CLOUDFLARE_DOT_HOSTNAME)
             }
             dpm.addUserRestriction(adminComponent, UserManager.DISALLOW_CONFIG_PRIVATE_DNS)
 
-            // 3. Force Accessibility
-            val serviceComponent = "${context.packageName}/.ConsciousnessAccessibilityService"
+            // 3. Accessibility "Lock" (whitelist)
+            // We CANNOT force-enable it (SecurityException), but we CAN prevent other apps from using it.
+            // This ensures that IF accessibility is on, it must be US.
             dpm.setPermittedAccessibilityServices(adminComponent, listOf(context.packageName))
-            dpm.setSecureSetting(adminComponent, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, serviceComponent)
-            dpm.setSecureSetting(adminComponent, Settings.Secure.ACCESSIBILITY_ENABLED, "1")
+
+            // REMOVED: setSecureSetting calls that cause the crash.
 
             Log.i("AlphonsoPolicy", "All Policies Enforced Successfully")
 
