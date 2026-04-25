@@ -41,6 +41,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     private var ortEnv: OrtEnvironment? = null
     private var ortSession: OrtSession? = null
     private lateinit var eventLogDao: EventLogDao
+    private lateinit var activeLockoutDao: ActiveLockoutDao
     private var firebaseDb: FirebaseDatabase? = null
     private lateinit var dpm: DevicePolicyManager
     private lateinit var adminComponent: ComponentName
@@ -105,11 +106,13 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
 
         // Initialize Room Database for Local Logging
-        val db = Room.databaseBuilder(applicationContext, EventLogDatabase::class.java, "event-log-database").build()
+        val db = Room.databaseBuilder(applicationContext, EventLogDatabase::class.java, "event-log-database").fallbackToDestructiveMigration().build()
         eventLogDao = db.eventLogDao()
+        activeLockoutDao = db.activeLockoutDao()
 
         initializeCensorView()
         initializeAI()
+        checkPendingUnlock()
         startScreenCapture()
     }
 
@@ -159,6 +162,25 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
             val modelBytes = assets.open("nudenet_320n.onnx").readBytes()
             ortSession = ortEnv?.createSession(modelBytes)
         } catch (_: Exception) { }
+    }
+
+    private fun checkPendingUnlock() {
+        inferenceScope.launch {
+            val lockouts = activeLockoutDao.getAllSync()
+            val now = System.currentTimeMillis()
+
+            for (lockout in lockouts) {
+                if (now >= lockout.unlockTime) {
+                    unhideApplication(lockout.packageName)
+                } else {
+                    val delayMs = lockout.unlockTime - now
+                    inferenceScope.launch {
+                        delay(delayMs)
+                        unhideApplication(lockout.packageName)
+                    }
+                }
+            }
+        }
     }
 
     private fun startScreenCapture() {
@@ -281,21 +303,32 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
             speakPrayer()
             performGlobalAction(GLOBAL_ACTION_HOME)
 
-            // Use the service's own scope to schedule the release
+            val unlockTime = System.currentTimeMillis() + (lockoutDurationMinutes * 60 * 1000)
+
             inferenceScope.launch {
+                activeLockoutDao.insert(ActiveLockoutEntity(packageName, unlockTime))
                 delay(lockoutDurationMinutes * 60 * 1000)
-                try {
-                    dpm.setApplicationHidden(adminComponent, packageName, false)
-                } catch (e: SecurityException) {
-                    Log.e(TAG, "Failed to unhide application after lockdown for $packageName", e)
-                } finally {
-                    isLockedOut = false
-                    lockedOutPackage = null
-                    logEvent(LogEventType.APP_RELEASED, "Lockdown ended", 0f, packageName)
-                }
+                unhideApplication(packageName)
             }
         } catch (e: SecurityException) {
             Log.e(TAG, "Failed to hide application to initiate lockdown for $packageName", e)
+        }
+    }
+
+    fun unhideApplication(packageName: String) {
+        try {
+            dpm.setApplicationHidden(adminComponent, packageName, false)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Failed to unhide application after lockdown for $packageName", e)
+        } finally {
+            if (lockedOutPackage == packageName) {
+                isLockedOut = false
+                lockedOutPackage = null
+            }
+            inferenceScope.launch {
+                activeLockoutDao.delete(packageName)
+            }
+            logEvent(LogEventType.APP_RELEASED, "Lockdown ended", 0f, packageName)
         }
     }
 

@@ -38,7 +38,31 @@ interface EventLogDao {
     suspend fun unmarkAsFalsePositive(id: Int)
 }
 
-@Database(entities = [EventLogEntity::class], version = 1, exportSchema = false)
+
+
+@Entity(tableName = "active_lockouts")
+data class ActiveLockoutEntity(
+    @PrimaryKey val packageName: String,
+    val unlockTime: Long
+)
+
+@Dao
+interface ActiveLockoutDao {
+    @Query("SELECT * FROM active_lockouts")
+    fun getAll(): Flow<List<ActiveLockoutEntity>>
+
+    @Query("SELECT * FROM active_lockouts")
+    suspend fun getAllSync(): List<ActiveLockoutEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(lockout: ActiveLockoutEntity)
+
+    @Query("DELETE FROM active_lockouts WHERE packageName = :packageName")
+    suspend fun delete(packageName: String)
+}
+
+@Database(entities = [EventLogEntity::class, ActiveLockoutEntity::class], version = 2, exportSchema = false)
 abstract class EventLogDatabase : RoomDatabase() {
     abstract fun eventLogDao(): EventLogDao
+    abstract fun activeLockoutDao(): ActiveLockoutDao
 }

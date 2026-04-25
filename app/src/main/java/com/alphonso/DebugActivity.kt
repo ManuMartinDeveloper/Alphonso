@@ -19,8 +19,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.room.Room
-import androidx.work.WorkInfo
-import androidx.work.WorkManager
+import android.app.admin.DevicePolicyManager
+import android.content.ComponentName
+import android.content.Context
 import com.google.firebase.database.FirebaseDatabase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -34,6 +35,7 @@ class DebugActivity : ComponentActivity() {
 
     private lateinit var database: FirebaseDatabase
     private lateinit var eventLogDao: EventLogDao
+    private lateinit var activeLockoutDao: ActiveLockoutDao
     private val activityScope = CoroutineScope(Dispatchers.Main)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -43,25 +45,18 @@ class DebugActivity : ComponentActivity() {
         try { database = FirebaseDatabase.getInstance() } catch (e: Exception) {}
 
         // Init Room
-        val db = Room.databaseBuilder(applicationContext, EventLogDatabase::class.java, "event-log-database").build()
+        val db = Room.databaseBuilder(applicationContext, EventLogDatabase::class.java, "event-log-database").fallbackToDestructiveMigration().build()
         eventLogDao = db.eventLogDao()
+        activeLockoutDao = db.activeLockoutDao()
 
         setContent {
             MaterialTheme {
                 // 1. LIVE LOGS: Collect the Flow directly from DAO
                 val allLogs by eventLogDao.getAll().collectAsState(initial = emptyList())
+                val activeLockouts by activeLockoutDao.getAll().collectAsState(initial = emptyList())
 
                 // 2. STATE: Filters
                 val selectedFilters = remember { mutableStateOf(emptySet<LogEventType>()) }
-
-                // 3. LIVE WORKER STATUS: Collect Flow from WorkManager
-                val workManager = WorkManager.getInstance(applicationContext)
-                val workInfoFlow = remember {
-                    workManager.getWorkInfosForUniqueWorkFlow("NightlyBatchWork").map { it.firstOrNull() }
-                }
-                val currentWorkInfo by workInfoFlow.collectAsState(initial = null)
-                val trainingState = currentWorkInfo?.state
-                val trainingProgress = currentWorkInfo?.progress?.getString("KEY_PROGRESS")
 
                 // 4. FILTER LOGIC
                 val filteredLogs = if (selectedFilters.value.isEmpty()) {
@@ -76,14 +71,24 @@ class DebugActivity : ComponentActivity() {
                 // 5. UI RENDER
                 DebugScreenContent(
                     eventLog = filteredLogs,
+                    activeLockouts = activeLockouts,
                     selectedFilters = selectedFilters.value,
                     onFilterChanged = { selectedFilters.value = it },
                     onClearLog = { activityScope.launch(Dispatchers.IO) { eventLogDao.clearAll() } },
                     onFlagFalsePositive = { id -> activityScope.launch(Dispatchers.IO) { eventLogDao.markAsFalsePositive(id) } },
                     onUndoFalsePositive = { id -> activityScope.launch(Dispatchers.IO) { eventLogDao.unmarkAsFalsePositive(id) } },
                     onRetrain = { /* Trigger logic */ },
-                    trainingState = trainingState,
-                    trainingProgress = trainingProgress
+                    onEmergencyUnlock = { packageName ->
+                        activityScope.launch(Dispatchers.IO) {
+                            try {
+                                val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+                                val adminComponent = ComponentName(this@DebugActivity, ConsciousnessDeviceAdminReceiver::class.java)
+                                dpm.setApplicationHidden(adminComponent, packageName, false)
+                            } catch (e: Exception) { e.printStackTrace() }
+                            activeLockoutDao.delete(packageName)
+                        }
+                    },
+
                 )
             }
         }
@@ -93,14 +98,14 @@ class DebugActivity : ComponentActivity() {
 @Composable
 fun DebugScreenContent(
     eventLog: List<EventLogEntity>,
+    activeLockouts: List<ActiveLockoutEntity>,
     selectedFilters: Set<LogEventType>,
     onFilterChanged: (Set<LogEventType>) -> Unit,
     onClearLog: () -> Unit,
     onFlagFalsePositive: (Int) -> Unit,
     onUndoFalsePositive: (Int) -> Unit,
     onRetrain: () -> Unit,
-    trainingState: WorkInfo.State?,
-    trainingProgress: String?
+    onEmergencyUnlock: (String) -> Unit
 ) {
     val context = LocalContext.current
     Column(modifier = Modifier.fillMaxSize()) {
@@ -113,11 +118,22 @@ fun DebugScreenContent(
             Button(onClick = { onClearLog(); Toast.makeText(context, "Logs Cleared", Toast.LENGTH_SHORT).show() }) {
                 Text("Clear Logs")
             }
-            if (trainingState == WorkInfo.State.RUNNING) {
-                CircularProgressIndicator(modifier = Modifier.size(24.dp))
-            } else {
-                Button(onClick = { onRetrain() }) { Text("Retrain AI") }
+            Button(onClick = { onRetrain() }) { Text("Retrain AI") }
+        }
+
+        if (activeLockouts.isNotEmpty()) {
+            Column(modifier = Modifier.fillMaxWidth().background(Color(0xFFFFEBEE)).padding(8.dp)) {
+                Text("Active Lockouts", fontWeight = FontWeight.Bold, color = Color.Red)
+                activeLockouts.forEach { lockout ->
+                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Text(lockout.packageName, fontSize = 12.sp)
+                        Button(onClick = { onEmergencyUnlock(lockout.packageName); Toast.makeText(context, "Unlocked ${lockout.packageName}", Toast.LENGTH_SHORT).show() }, colors = ButtonDefaults.buttonColors(containerColor = Color.Red)) {
+                            Text("Emergency Unlock", fontSize = 10.sp)
+                        }
+                    }
+                }
             }
+            HorizontalDivider()
         }
 
         // --- FILTER CHIPS ---
@@ -136,13 +152,13 @@ fun DebugScreenContent(
             }
         }
 
-        Divider()
+        HorizontalDivider()
 
         // --- LOG LIST ---
         LazyColumn(modifier = Modifier.weight(1f)) {
             items(eventLog) { log ->
                 EventLogItem(log, onFlagFalsePositive, onUndoFalsePositive)
-                Divider(color = Color.LightGray, thickness = 0.5.dp)
+                HorizontalDivider(color = Color.LightGray, thickness = 0.5.dp)
             }
         }
     }

@@ -33,14 +33,14 @@ class MainActivity : ComponentActivity() {
         }
 
         // 2. Start the "Unkillable" Watchdog
-        startForegroundService(Intent(this, AppMonitorService::class.java))
+        try { startForegroundService(Intent(this, AppMonitorService::class.java)) } catch (e: Exception) { e.printStackTrace() }
 
         // 3. REMOVED: NightlyBatchWorker (As requested)
         // TODO: Re-implement NightlyBatchWorker for daily maintenance later.
 
         // 4. Login Check
         if (FirebaseAuth.getInstance().currentUser == null) {
-            startActivity(Intent(this, LoginActivity::class.java))
+            try { startActivity(Intent(this, LoginActivity::class.java)) } catch (e: Exception) { e.printStackTrace() }
             finish()
             return
         }
@@ -73,7 +73,7 @@ fun MainScreen() {
                 // Run in background to avoid freezing the button
                 // (Note: To do this properly in Compose, you'd use a CoroutineScope,
                 // but for a quick fix, this is okay or use the service)
-                context.startForegroundService(Intent(context, AppMonitorService::class.java))
+                try { context.startForegroundService(Intent(context, AppMonitorService::class.java)) } catch (e: Exception) { e.printStackTrace() }
                 Toast.makeText(context, "Policies Refreshing...", Toast.LENGTH_SHORT).show()
             },
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
@@ -84,7 +84,7 @@ fun MainScreen() {
         Spacer(modifier = Modifier.height(16.dp))
 
         Button(onClick = {
-            context.startActivity(Intent(context, SettingsActivity::class.java))
+            try { context.startActivity(Intent(context, SettingsActivity::class.java)) } catch (e: Exception) { e.printStackTrace() }
         }) {
             Text("Settings")
         }
@@ -92,7 +92,7 @@ fun MainScreen() {
         Spacer(modifier = Modifier.height(16.dp))
 
         Button(onClick = {
-            context.startActivity(Intent(context, DebugActivity::class.java))
+            try { context.startActivity(Intent(context, DebugActivity::class.java)) } catch (e: Exception) { e.printStackTrace() }
         }) {
             Text("Debug Console")
         }
