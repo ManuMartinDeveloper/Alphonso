@@ -67,13 +67,13 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     private var lockoutDurationMinutes = 3L
     private var strikeLimit = 5
     private var scanDelayNormal = 2000L
-    private var scanDelayAlert = 50L
+    private var scanDelayAlert = 100L
     private var strikeResetWindowMs = 300000L
     private var prayerText = "Hail Mary, full of grace, the Lord is with thee. Blessed art thou among women, and blessed is the fruit of thy womb, Jesus. Holy Mary, Mother of God, pray for us sinners, now and at the hour of our death. Amen."
 
-    private val labelThresholds = mutableMapOf(2 to 0.60f, 3 to 0.55f, 4 to 0.50f, 6 to 0.50f, 14 to 0.50f)
-    private val defaultThreshold = 0.65f
-    private val lowConfidenceLogThreshold = 0.15f
+    private val labelThresholds = mutableMapOf(2 to 0.40f, 3 to 0.40f, 4 to 0.40f, 6 to 0.40f, 14 to 0.40f) // Lowered thresholds for testing
+    private val defaultThreshold = 0.50f
+    private val lowConfidenceLogThreshold = 0.05f
 
     private var tts: TextToSpeech? = null
     private var isTtsReady = false
@@ -153,7 +153,10 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
             val params = WindowManager.LayoutParams(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN, PixelFormat.TRANSLUCENT)
             params.gravity = Gravity.TOP or Gravity.START
             windowManager?.addView(censorView, params)
-        } catch (_: Exception) { }
+            Log.d(TAG, "CensorView initialized and added to WindowManager")
+        } catch (e: Exception) {
+            Log.e(TAG, "CensorView initialization failed", e)
+        }
     }
 
     private fun initializeAI() {
@@ -161,7 +164,10 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
             ortEnv = OrtEnvironment.getEnvironment()
             val modelBytes = assets.open("nudenet_320n.onnx").readBytes()
             ortSession = ortEnv?.createSession(modelBytes)
-        } catch (_: Exception) { }
+            Log.d(TAG, "ONNX Session created successfully. Input names: ${ortSession?.inputNames}")
+        } catch (e: Exception) {
+            Log.e(TAG, "AI Initialization Failed", e)
+        }
     }
 
     private fun checkPendingUnlock() {
@@ -185,23 +191,32 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
 
     private fun startScreenCapture() {
         screenCaptureScope.launch {
+            Log.d(TAG, "Screen capture loop started")
             while (isActive) {
                 if (System.currentTimeMillis() < remoteDisabledUntil || censorGloballyDisabled) {
                     withContext(Dispatchers.Main) { censorView?.clear() }
                     delay(5000)
                     continue
                 }
-                takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
-                    override fun onSuccess(screenshot: ScreenshotResult) {
-                        val bitmap = Bitmap.wrapHardwareBuffer(screenshot.hardwareBuffer, screenshot.colorSpace)
-                        bitmap?.let {
-                            processImage(it.copy(Bitmap.Config.ARGB_8888, true))
-                            it.recycle()
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                    takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
+                        override fun onSuccess(screenshot: ScreenshotResult) {
+                            val bitmap = Bitmap.wrapHardwareBuffer(screenshot.hardwareBuffer, screenshot.colorSpace)
+                            bitmap?.let {
+                                val softwareBitmap = it.copy(Bitmap.Config.ARGB_8888, true)
+                                processImage(softwareBitmap)
+                                it.recycle()
+                            }
+                            screenshot.hardwareBuffer.close()
                         }
-                        screenshot.hardwareBuffer.close()
-                    }
-                    override fun onFailure(errorCode: Int) {}
-                })
+                        override fun onFailure(errorCode: Int) {
+                            Log.e(TAG, "takeScreenshot failed with error code: $errorCode")
+                        }
+                    })
+                } else {
+                    Log.w(TAG, "takeScreenshot not supported on this Android version")
+                    delay(5000)
+                }
                 delay(if (System.currentTimeMillis() < highAlertUntil) scanDelayAlert else scanDelayNormal)
             }
         }
@@ -210,14 +225,21 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
     private fun processImage(bitmap: Bitmap) {
         inferenceScope.launch {
             try {
-                if (ortSession == null) { bitmap.recycle(); return@launch }
+                if (ortSession == null) {
+                    Log.w(TAG, "ortSession is null, skipping processing")
+                    bitmap.recycle()
+                    return@launch
+                }
                 val resized = resizeWithPadding(bitmap, 320, 320)
                 val floatBuffer = preprocessBitmap(resized)
                 val inputName = ortSession?.inputNames?.iterator()?.next() ?: return@launch
                 val inputTensor = OnnxTensor.createTensor(ortEnv, floatBuffer, longArrayOf(1, 3, 320, 320))
 
                 ortSession?.run(Collections.singletonMap(inputName, inputTensor))?.use { results ->
-                    val output = (results.get(0).value as? Array<Array<FloatArray>>)?.get(0)
+                    val outputValue = results.get(0).value
+                    // YOLOv8 output is typically float[1][22][2100]
+                    val output = (outputValue as? Array<Array<FloatArray>>)?.get(0)
+                    
                     if (output != null) {
                         val allDetectedBoxes = mutableListOf<Rect>()
                         var highConfidenceTrigger: Pair<String, Float>? = null
@@ -236,14 +258,23 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
                                 val score = output[c + 4][i]
                                 if (score > maxScore) { maxScore = score; classIndex = c }
                             }
+                            
+                            if (maxScore > lowConfidenceLogThreshold) {
+                                // Log.v(TAG, "Box $i: class $classIndex, score $maxScore")
+                            }
+
                             if (!SENSITIVE_INDICES.contains(classIndex)) continue
+                            
                             val actionThreshold = labelThresholds[classIndex] ?: defaultThreshold
                             if (maxScore > actionThreshold) {
                                 val cx = output[0][i]; val cy = output[1][i]; val w = output[2][i]; val h = output[3][i]
+                                
                                 val realCx = (cx - offsetX) / scale; val realCy = (cy - offsetY) / scale
                                 val realW = w / scale; val realH = h / scale
+                                
                                 val left = (realCx - realW / 2).toInt(); val top = (realCy - realH / 2).toInt()
                                 val right = (realCx + realW / 2).toInt(); val bottom = (realCy + realH / 2).toInt()
+                                
                                 allDetectedBoxes.add(Rect(left, top, right, bottom))
                                 val label = ALL_CLASSES.getOrElse(classIndex) { "Unknown" }
                                 if (highConfidenceTrigger == null || maxScore > highConfidenceTrigger!!.second) {
@@ -254,16 +285,22 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
 
                         withContext(Dispatchers.Main) {
                             if (allDetectedBoxes.isNotEmpty()) {
+                                Log.d(TAG, "Detections: ${allDetectedBoxes.size} areas found. Top: ${highConfidenceTrigger?.first} (${highConfidenceTrigger?.second})")
                                 censorView?.censorAreas(allDetectedBoxes, bitmap)
                                 highConfidenceTrigger?.let { handleDetections(it.first, it.second) }
                             } else {
                                 censorView?.clear()
                             }
                         }
+                    } else {
+                        Log.w(TAG, "Model output format mismatch: ${outputValue?.javaClass?.name}")
                     }
                 }
                 inputTensor.close(); resized.recycle(); bitmap.recycle()
-            } catch (e: Exception) { bitmap.recycle() }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in processImage", e)
+                bitmap.recycle()
+            }
         }
     }
 
@@ -272,16 +309,13 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         if (isLockedOut) return
 
         val detectedPackage = rootInActiveWindow?.packageName?.toString() ?: "unknown"
-
-        // --- SAFEGUARD: Skip detection if we are in the Alphonso app itself ---
         if (detectedPackage == applicationContext.packageName) return
 
         strikeCount++
+        Log.i(TAG, "Strike $strikeCount: $label ($confidence) in $detectedPackage")
         Toast.makeText(this, "Strike $strikeCount: $label", Toast.LENGTH_SHORT).show()
 
-        // Log to DB and Firebase
         logEvent(LogEventType.DETECTION, label, confidence, detectedPackage)
-
         speakPrayer()
 
         if (strikeCount >= strikeLimit) {
@@ -291,7 +325,7 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
 
     private fun initiateLockdown(reason: String, confidence: Float, packageName: String) {
         if (isLockedOut) return
-
+        Log.w(TAG, "Initiating lockdown for $packageName. Reason: $reason")
         logEvent(LogEventType.APP_BLOCKED, reason, confidence, packageName)
 
         try {
@@ -336,9 +370,6 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         if (event == null || isLockedOut) return
 
         val packageName = event.packageName?.toString() ?: return
-
-        // --- SAFEGUARD: Skip text scanning if we are in the Alphonso app ---
-        // This prevents the app from closing when viewing logs containing blocked words.
         if (packageName == applicationContext.packageName) return
 
         if (browserPackages.contains(packageName) || !packageName.contains("systemui")) {
@@ -347,12 +378,10 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
 
             for (keyword in blocklist) {
                 if (allText.contains(keyword)) {
+                    Log.i(TAG, "Keyword block: $keyword in $packageName")
                     performGlobalAction(GLOBAL_ACTION_BACK)
                     performGlobalAction(GLOBAL_ACTION_HOME)
-
-                    // Log the text blocking event
                     logEvent(LogEventType.DETECTION, "Text Block: $keyword", 1.0f, packageName)
-
                     Toast.makeText(this, "Blocked: $keyword", Toast.LENGTH_SHORT).show()
                     return
                 }
@@ -372,11 +401,8 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         if (isTtsReady) tts?.speak(prayerText, TextToSpeech.QUEUE_FLUSH, null, "prayer")
     }
 
-    // --- NEW: Unified Logging (Firebase + Local Database) ---
     private fun logEvent(type: LogEventType, details: String, confidence: Float, packageName: String) {
         val timestamp = System.currentTimeMillis()
-
-        // 1. Log to Firebase
         val uid = auth.currentUser?.uid
         if (uid != null) {
             val entry = mapOf(
@@ -388,8 +414,6 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
             )
             firebaseDb?.getReference("users/$uid/incidents")?.push()?.setValue(entry)
         }
-
-        // 2. Log to Local Room Database
         inferenceScope.launch {
             try {
                 eventLogDao.insert(EventLogEntity(
@@ -425,8 +449,8 @@ class ConsciousnessAccessibilityService : AccessibilityService(), TextToSpeech.O
         for (i in 0 until 320 * 320) {
             val px = intValues[i]
             buffer.put(i, ((px shr 16) and 0xFF) / 255.0f)
-            buffer.put(i + 320*320, ((px shr 8) and 0xFF) / 255.0f)
-            buffer.put(i + 2*320*320, (px and 0xFF) / 255.0f)
+            buffer.put(i + 320 * 320, ((px shr 8) and 0xFF) / 255.0f)
+            buffer.put(i + 2 * 320 * 320, (px and 0xFF) / 255.0f)
         }
         buffer.rewind()
         return buffer
