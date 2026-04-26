@@ -83,6 +83,14 @@ fun MainScreen() {
 
         Spacer(modifier = Modifier.height(16.dp))
 
+                Button(onClick = {
+            try { context.startActivity(Intent(context, PermissionsActivity::class.java)) } catch (e: Exception) { e.printStackTrace() }
+        }) {
+            Text("Permissions Status")
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
         Button(onClick = {
             try { context.startActivity(Intent(context, SettingsActivity::class.java)) } catch (e: Exception) { e.printStackTrace() }
         }) {
