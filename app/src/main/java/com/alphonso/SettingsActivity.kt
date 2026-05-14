@@ -1,6 +1,7 @@
 package com.alphonso
 
 import android.os.Bundle
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -44,7 +45,6 @@ class SettingsActivity : ComponentActivity() {
 
         var remoteDisabledUntil by remember { mutableLongStateOf(0L) }
         var isCensorGloballyDisabled by remember { mutableStateOf(false) }
-        var isGlobalLockoutEnabled by remember { mutableStateOf(false) }
         var timeRemaining by remember { mutableStateOf("Active") }
 
         var serviceRequestPending by remember { mutableStateOf(false) }
@@ -53,58 +53,45 @@ class SettingsActivity : ComponentActivity() {
         val behaviorSettings = remember { mutableStateMapOf<String, String>() }
         val blocklist = remember { mutableStateListOf<String>() }
 
-        val db = FirebaseDatabase.getInstance("https://alphonso-c7f69-default-rtdb.asia-southeast1.firebasedatabase.app")
+        val db = FirebaseDatabase.getInstance()
 
         DisposableEffect(Unit) {
             val remoteSettingsRef = db.getReference("remote_settings")
-            val disableListener = remoteSettingsRef.child("filtering_disabled_until").addValueEventListener(object : ValueEventListener {
-                override fun onDataChange(snapshot: DataSnapshot) { remoteDisabledUntil = snapshot.getValue(Long::class.java) ?: 0L }
-                override fun onCancelled(error: DatabaseError) {}
-            })
-            val censorListener = remoteSettingsRef.child("censor_globally_disabled").addValueEventListener(object : ValueEventListener {
-                override fun onDataChange(snapshot: DataSnapshot) { isCensorGloballyDisabled = snapshot.getValue(Boolean::class.java) ?: false }
-                override fun onCancelled(error: DatabaseError) {}
-            })
-            val lockoutListener = remoteSettingsRef.child("global_lockout_enabled").addValueEventListener(object : ValueEventListener {
-                override fun onDataChange(snapshot: DataSnapshot) { isGlobalLockoutEnabled = snapshot.getValue(Boolean::class.java) ?: false }
-                override fun onCancelled(error: DatabaseError) {}
-            })
-
-            val requestsRef = db.getReference("requests")
-            val serviceRequestListener = requestsRef.child("service_status_request").addValueEventListener(object : ValueEventListener {
-                override fun onDataChange(snapshot: DataSnapshot) { serviceRequestPending = snapshot.exists() }
+            val remoteSettingsListener = remoteSettingsRef.addValueEventListener(object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) {
+                    behaviorSettings.clear()
+                    
+                    remoteDisabledUntil = snapshot.child("filtering_disabled_until").getValue(Long::class.java) ?: 0L
+                    isCensorGloballyDisabled = snapshot.child("censor_globally_disabled").getValue(Boolean::class.java) ?: false
+                    
+                    snapshot.child("lockout_duration_minutes").getValue(Long::class.java)?.let { behaviorSettings["Lockout Duration"] = "$it minutes" }
+                    snapshot.child("strike_limit").getValue(Long::class.java)?.let { behaviorSettings["Strike Limit"] = "$it strikes" }
+                    snapshot.child("scan_delay_normal").getValue(Long::class.java)?.let { behaviorSettings["Normal Scan Speed"] = "${it}ms" }
+                    snapshot.child("scan_delay_alert").getValue(Long::class.java)?.let { behaviorSettings["Alert Scan Speed"] = "${it}ms" }
+                    snapshot.child("prayer_text").getValue(String::class.java)?.let { behaviorSettings["Prayer Text"] = it }
+                }
                 override fun onCancelled(error: DatabaseError) {}
             })
 
-            val configRef = db.getReference("config")
-            val threshListener = configRef.child("thresholds").addValueEventListener(object : ValueEventListener {
+            val sensitivityRef = db.getReference("category_sensitivity")
+            val sensitivityListener = sensitivityRef.addValueEventListener(object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
                     thresholds.clear()
+                    val defaultThresh = snapshot.child("default").getValue(Double::class.java) ?: 0.50
+                    thresholds["Default Threshold"] = "${(defaultThresh * 100).toInt()}%"
+                    
                     snapshot.children.forEach { child ->
-                        val labelName = child.key
-                        val rawValue = child.value
-                        val value = when (rawValue) {
-                            is Long -> rawValue.toFloat(); is Double -> rawValue.toFloat(); else -> null
+                        if (child.key != "default") {
+                            val name = child.child("name").getValue(String::class.java) ?: "Category ${child.key}"
+                            val thresh = child.child("threshold").getValue(Double::class.java) ?: defaultThresh
+                            thresholds[name] = "${(thresh * 100).toInt()}%"
                         }
-                        if (labelName != null && value != null) { thresholds[labelName] = "${(value * 100).toInt()}%" }
                     }
                 }
                 override fun onCancelled(error: DatabaseError) {}
             })
 
-            val behaviorListener = configRef.child("behavior").addValueEventListener(object : ValueEventListener {
-                override fun onDataChange(snapshot: DataSnapshot) {
-                    behaviorSettings.clear()
-                    snapshot.child("lockoutDurationMinutes").getValue(Long::class.java)?.let { behaviorSettings["Lockout Duration"] = "$it minutes" }
-                    snapshot.child("strikeLimit").getValue(Int::class.java)?.let { behaviorSettings["Strike Limit"] = "$it strikes" }
-                    snapshot.child("scanDelayNormal").getValue(Long::class.java)?.let { behaviorSettings["Normal Scan Speed"] = "${it}ms" }
-                    snapshot.child("scanDelayAlert").getValue(Long::class.java)?.let { behaviorSettings["Alert Scan Speed"] = "${it}ms" }
-                    snapshot.child("strikeResetWindowMs").getValue(Long::class.java)?.let { behaviorSettings["Strike Reset Window"] = "${it / 1000}s" }
-                    snapshot.child("prayerText").getValue(String::class.java)?.let { behaviorSettings["Prayer Text"] = it }
-                }
-                override fun onCancelled(error: DatabaseError) {}
-            })
-
+            val configRef = db.getReference("config")
             val blocklistListener = configRef.child("blocklist").addValueEventListener(object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
                     blocklist.clear()
@@ -115,15 +102,17 @@ class SettingsActivity : ComponentActivity() {
                 override fun onCancelled(error: DatabaseError) {}
             })
 
+            val requestsRef = db.getReference("requests")
+            val serviceRequestListener = requestsRef.child("service_status_request").addValueEventListener(object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) { serviceRequestPending = snapshot.exists() }
+                override fun onCancelled(error: DatabaseError) {}
+            })
 
             onDispose {
-                remoteSettingsRef.child("filtering_disabled_until").removeEventListener(disableListener)
-                remoteSettingsRef.child("censor_globally_disabled").removeEventListener(censorListener)
-                remoteSettingsRef.child("global_lockout_enabled").removeEventListener(lockoutListener)
-                requestsRef.child("service_status_request").removeEventListener(serviceRequestListener)
-                configRef.child("thresholds").removeEventListener(threshListener)
-                configRef.child("behavior").removeEventListener(behaviorListener)
+                remoteSettingsRef.removeEventListener(remoteSettingsListener)
+                sensitivityRef.removeEventListener(sensitivityListener)
                 configRef.child("blocklist").removeEventListener(blocklistListener)
+                requestsRef.child("service_status_request").removeEventListener(serviceRequestListener)
             }
         }
 
@@ -142,7 +131,7 @@ class SettingsActivity : ComponentActivity() {
             }
         }
 
-        Scaffold(topBar = { }) { padding ->
+        Scaffold { padding ->
             LazyColumn(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp)) {
 
                 item {
@@ -163,35 +152,18 @@ class SettingsActivity : ComponentActivity() {
                     )
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    Row(
+                    StatusCard(
+                        title = "Censoring Blocks",
+                        status = if(isCensorGloballyDisabled) "Disabled" else "Enabled",
+                        isNormal = !isCensorGloballyDisabled,
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        StatusCard(
-                            title = "Censoring Blocks",
-                            status = if(isCensorGloballyDisabled) "Disabled" else "Enabled",
-                            isNormal = !isCensorGloballyDisabled,
-                            modifier = Modifier.weight(1f),
-                            buttonText = if (isCensorGloballyDisabled) "Enable" else "Disable",
-                            onButtonClick = {
-                                val newValue = !isCensorGloballyDisabled
-                                db.getReference("remote_settings/censor_globally_disabled").setValue(newValue)
-                                Toast.makeText(context, "Censoring ${if(newValue) "disabled" else "enabled"}", Toast.LENGTH_SHORT).show()
-                            }
-                        )
-                        StatusCard(
-                            title = "Global Lockout",
-                            status = if(isGlobalLockoutEnabled) "ACTIVE" else "Inactive",
-                            isNormal = !isGlobalLockoutEnabled,
-                            modifier = Modifier.weight(1f),
-                            buttonText = if (isGlobalLockoutEnabled) "End Lockout" else "Start Lockout",
-                            onButtonClick = {
-                                val newValue = !isGlobalLockoutEnabled
-                                db.getReference("remote_settings/global_lockout_enabled").setValue(newValue)
-                                Toast.makeText(context, "Global Lockout ${if(newValue) "started" else "ended"}", Toast.LENGTH_SHORT).show()
-                            }
-                        )
-                    }
+                        buttonText = if (isCensorGloballyDisabled) "Enable" else "Disable",
+                        onButtonClick = {
+                            val newValue = !isCensorGloballyDisabled
+                            db.getReference("remote_settings/censor_globally_disabled").setValue(newValue)
+                            Toast.makeText(context, "Censoring ${if(newValue) "disabled" else "enabled"}", Toast.LENGTH_SHORT).show()
+                        }
+                    )
 
                     Spacer(modifier = Modifier.height(24.dp))
                     HorizontalDivider()
@@ -199,23 +171,30 @@ class SettingsActivity : ComponentActivity() {
                 }
 
                 item { BlocklistSection(blocklist.sorted()) }
-                item { Spacer(modifier = Modifier.height(24.dp)); HorizontalDivider(); Spacer(modifier = Modifier.height(8.dp)) }
-
-                item {
-                    Text("Remote Behavior (Read-Only)", fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 8.dp))
+                
+                item { 
+                    Spacer(modifier = Modifier.height(24.dp))
+                    HorizontalDivider()
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("Remote Behavior (Live)", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 }
+                
                 items(behaviorSettings.toList().sortedBy { it.first }) { (label, value) ->
                     SettingsRow(label, value)
                 }
                 
-                item { Spacer(modifier = Modifier.height(24.dp)); HorizontalDivider(); Spacer(modifier = Modifier.height(8.dp)) }
-
-                item {
-                    Text("Remote Sensitivity (Read-Only)", fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 8.dp))
+                item { 
+                    Spacer(modifier = Modifier.height(24.dp))
+                    HorizontalDivider()
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("Remote Sensitivity (AI Labels)", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 }
+                
                 items(thresholds.toList().sortedBy { it.first }) { (label, value) ->
                     SettingsRow(label, value)
                 }
+                
+                item { Spacer(modifier = Modifier.height(40.dp)) }
             }
         }
     }
@@ -251,12 +230,18 @@ class SettingsActivity : ComponentActivity() {
 
     @Composable
     private fun SettingsRow(label: String, value: String) {
-        Row(
+        Card(
             modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-            horizontalArrangement = Arrangement.SpaceBetween
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
         ) {
-            Text(label, fontSize = 14.sp)
-            Text(value, fontSize = 14.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start=8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(label, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                Text(value, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+            }
         }
     }
 
@@ -289,10 +274,13 @@ class SettingsActivity : ComponentActivity() {
                     if (blocklist.isEmpty()) {
                         Text("No keywords in blocklist.", modifier = Modifier.padding(vertical = 8.dp), style = MaterialTheme.typography.bodyMedium)
                     } else {
-                        LazyColumn(modifier = Modifier.heightIn(max = 200.dp)) {
-                            items(blocklist) { keyword ->
+                        Column {
+                            blocklist.take(10).forEach { keyword ->
                                 Text(text = keyword, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp))
                                 HorizontalDivider()
+                            }
+                            if (blocklist.size > 10) {
+                                Text("... and ${blocklist.size - 10} more", modifier = Modifier.padding(vertical = 8.dp), style = MaterialTheme.typography.labelSmall)
                             }
                         }
                     }
