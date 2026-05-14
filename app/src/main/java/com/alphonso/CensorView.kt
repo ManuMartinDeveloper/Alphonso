@@ -1,65 +1,103 @@
 package com.alphonso
 
+import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
+import android.graphics.Typeface
+import android.text.StaticLayout
+import android.text.TextPaint
 import android.view.View
+import android.view.animation.AccelerateDecelerateInterpolator
 
 class CensorView(context: Context) : View(context) {
 
-    private val paint = Paint()
-    // We store the blurred image patches here
+    private val paint = Paint().apply {
+        isFilterBitmap = true
+        isAntiAlias = true
+    }
+    
+    private val textPaint = TextPaint().apply {
+        color = Color.WHITE
+        textSize = 48f
+        isAntiAlias = true
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD_ITALIC)
+        setShadowLayer(10f, 0f, 0f, Color.BLACK)
+        textAlign = Paint.Align.CENTER
+    }
+
     private val blurredBitmaps = mutableListOf<Bitmap>()
-    // We keep the rects to know where to draw them
     private val drawPositions = mutableListOf<Rect>()
 
     private var isGloballyLockedDown = false
+    private var globalOverlayAlpha = 0
+    private var prayerText: String = ""
+
+    private var fadeAnimator: ValueAnimator? = null
 
     init {
-        paint.color = Color.BLACK
-        paint.style = Paint.Style.FILL
+        visibility = View.GONE
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
         if (isGloballyLockedDown) {
-            // Full screen blackout for lockdown
-            canvas.drawColor(Color.BLACK)
+            canvas.drawColor(Color.argb(globalOverlayAlpha, 0, 0, 0))
         } else {
-            // Draw each blurred patch at its correct position
+            // Draw each blurred patch
             for (i in drawPositions.indices) {
                 if (i < blurredBitmaps.size && !blurredBitmaps[i].isRecycled) {
                     val rect = drawPositions[i]
-                    canvas.drawBitmap(blurredBitmaps[i], rect.left.toFloat(), rect.top.toFloat(), paint)
+                    canvas.drawBitmap(blurredBitmaps[i], null, rect, paint)
                 }
+            }
+
+            // Draw Prayer Text if present
+            if (prayerText.isNotEmpty() && drawPositions.isNotEmpty()) {
+                val x = width / 2f
+                val y = height / 2f
+                
+                // Wrap text to fit screen width
+                val padding = 100f
+                val textWidth = (width - padding * 2).toInt()
+                
+                val staticLayout = android.text.StaticLayout.Builder.obtain(
+                    prayerText, 0, prayerText.length, textPaint, textWidth
+                ).setAlignment(android.text.Layout.Alignment.ALIGN_CENTER)
+                 .setLineSpacing(0f, 1.2f)
+                 .build()
+
+                canvas.save()
+                canvas.translate(x, y - staticLayout.height / 2f)
+                staticLayout.draw(canvas)
+                canvas.restore()
             }
         }
     }
 
-    /**
-     * New function that takes the source image (screenshot) to create blurs.
-     */
-    fun censorAreas(rects: List<Rect>, sourceBitmap: Bitmap?) {
-        // Clean up old bitmaps
-        for (bmp in blurredBitmaps) {
-            if (!bmp.isRecycled) bmp.recycle()
-        }
-        blurredBitmaps.clear()
-        drawPositions.clear()
+    fun setPrayerText(text: String) {
+        this.prayerText = text
+        invalidate()
+    }
 
+    fun censorAreas(rects: List<Rect>, sourceBitmap: Bitmap?) {
         if (rects.isEmpty() || sourceBitmap == null || sourceBitmap.isRecycled) {
-            if (!isGloballyLockedDown) visibility = View.GONE
+            if (!isGloballyLockedDown) {
+                smoothHide()
+            }
             return
         }
 
+        // Clean up old bitmaps
+        clearBitmaps()
+        drawPositions.clear()
         drawPositions.addAll(rects)
 
         for (rect in rects) {
-            // Safety check: ensure rect fits inside image
             val safeLeft = rect.left.coerceIn(0, sourceBitmap.width - 1)
             val safeTop = rect.top.coerceIn(0, sourceBitmap.height - 1)
             val safeRight = rect.right.coerceIn(safeLeft + 1, sourceBitmap.width)
@@ -70,27 +108,16 @@ class CensorView(context: Context) : View(context) {
 
             if (safeWidth > 0 && safeHeight > 0) {
                 try {
-                    // 1. Crop the sensitive area
                     val cropped = Bitmap.createBitmap(sourceBitmap, safeLeft, safeTop, safeWidth, safeHeight)
 
-                    // 2. PIXELATION EFFECT (Granular Blur)
-                    // We shrink it aggressively.
-                    // 0.04f means a 100px wide object becomes just 4 giant pixels.
-                    val pixelationFactor = 0.04f
-
-                    val smallW = (safeWidth * pixelationFactor).toInt().coerceAtLeast(2)
-                    val smallH = (safeHeight * pixelationFactor).toInt().coerceAtLeast(2)
+                    // Better pixelation factor for UX
+                    val pixelationFactor = 0.12f 
+                    val smallW = (safeWidth * pixelationFactor).toInt().coerceAtLeast(8)
+                    val smallH = (safeHeight * pixelationFactor).toInt().coerceAtLeast(8)
 
                     val small = Bitmap.createScaledBitmap(cropped, smallW, smallH, true)
-
-                    // 3. Scale back up WITHOUT filtering
-                    // 'filter = false' is the key! It keeps the pixels sharp and blocky (granular).
-                    val pixelated = Bitmap.createScaledBitmap(small, safeWidth, safeHeight, false)
-
-                    blurredBitmaps.add(pixelated)
-
+                    blurredBitmaps.add(small)
                     cropped.recycle()
-                    small.recycle()
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
@@ -98,35 +125,65 @@ class CensorView(context: Context) : View(context) {
         }
 
         if (drawPositions.isNotEmpty() && !isGloballyLockedDown) {
-            visibility = View.VISIBLE
+            if (visibility != View.VISIBLE) {
+                visibility = View.VISIBLE
+                alpha = 0f
+                animate().alpha(1f).setDuration(300).start()
+            }
             invalidate()
+        }
+    }
+
+    private fun smoothHide() {
+        if (visibility == View.VISIBLE) {
+            animate().alpha(0f).setDuration(400).withEndAction {
+                visibility = View.GONE
+                clearBitmaps()
+                drawPositions.clear()
+            }.start()
         }
     }
 
     fun triggerLockdown() {
         isGloballyLockedDown = true
         visibility = View.VISIBLE
-        invalidate()
+        fadeAnimator?.cancel()
+        fadeAnimator = ValueAnimator.ofInt(0, 255).apply {
+            duration = 800
+            interpolator = AccelerateDecelerateInterpolator()
+            addUpdateListener {
+                globalOverlayAlpha = it.animatedValue as Int
+                invalidate()
+            }
+            start()
+        }
     }
 
     fun clearGlobalLockdown() {
-        isGloballyLockedDown = false
-        if (drawPositions.isEmpty()) {
-            visibility = View.GONE
+        fadeAnimator?.cancel()
+        fadeAnimator = ValueAnimator.ofInt(globalOverlayAlpha, 0).apply {
+            duration = 600
+            addUpdateListener {
+                globalOverlayAlpha = it.animatedValue as Int
+                if (globalOverlayAlpha == 0 && drawPositions.isEmpty()) {
+                    visibility = View.GONE
+                }
+                invalidate()
+            }
+            start()
         }
-        invalidate()
+        isGloballyLockedDown = false
     }
 
-    fun clear() {
-        // Clean up
+    private fun clearBitmaps() {
         for (bmp in blurredBitmaps) {
             if (!bmp.isRecycled) bmp.recycle()
         }
         blurredBitmaps.clear()
-        drawPositions.clear()
+    }
 
-        if (!isGloballyLockedDown) {
-            visibility = View.GONE
-        }
+    fun clear() {
+        if (isGloballyLockedDown) return
+        smoothHide()
     }
 }
