@@ -4,54 +4,73 @@ import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.Color
 
-private val DarkColorScheme = darkColorScheme(
-    primary = Purple80,
-    secondary = PurpleGrey80,
-    tertiary = Pink80
+private val SanctuaryDarkColorScheme = darkColorScheme(
+    primary = LiturgicalGoldLight,
+    onPrimary = SanctuaryNavy,
+    primaryContainer = LiturgicalGoldDark,
+    onPrimaryContainer = SacredIvory,
+    secondary = MarianBlueLight,
+    onSecondary = Color.White,
+    secondaryContainer = MarianBlueDark,
+    onSecondaryContainer = SacredIvory,
+    tertiary = RubySacrificeLight,
+    onTertiary = Color.White,
+    background = SanctuaryNavy,
+    onBackground = SacredIvory,
+    surface = SanctuaryDarkSurface,
+    onSurface = SacredIvory,
+    surfaceVariant = SanctuaryCardSurface,
+    onSurfaceVariant = SacredParchment,
+    outline = BorderSubtle,
+    error = RubySacrificeLight,
+    onError = Color.White
 )
 
-private val LightColorScheme = lightColorScheme(
-    primary = Purple40,
-    secondary = PurpleGrey40,
-    tertiary = Pink40
-
-    /* Other default colors to override
-    background = Color(0xFFFFFBFE),
-    surface = Color(0xFFFFFBFE),
+private val SanctuaryLightColorScheme = lightColorScheme(
+    primary = MarianBlue,
     onPrimary = Color.White,
-    onSecondary = Color.White,
+    primaryContainer = Color(0xFFE2EDF8),
+    onPrimaryContainer = MarianBlueDark,
+    secondary = LiturgicalGold,
+    onSecondary = SanctuaryNavy,
+    secondaryContainer = Color(0xFFFFF3D6),
+    onSecondaryContainer = LiturgicalGoldDark,
+    tertiary = RubySacrifice,
     onTertiary = Color.White,
-    onBackground = Color(0xFF1C1B1F),
-    onSurface = Color(0xFF1C1B1F),
-    */
+    background = SacredParchment,
+    onBackground = SanctuaryNavy,
+    surface = Color.White,
+    onSurface = SanctuaryNavy,
+    surfaceVariant = Color(0xFFF0EBE1),
+    onSurfaceVariant = SanctuaryNavy,
+    outline = Color(0xFFD3CABE),
+    error = RubySacrifice,
+    onError = Color.White
 )
 
 @Composable
-fun AlphonsoTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
-    // Dynamic color is available on Android 12+
-    dynamicColor: Boolean = true,
+fun SanctuaryTheme(
+    darkTheme: Boolean = true, // Default to deep sacred dark atmosphere
     content: @Composable () -> Unit
 ) {
-    val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-
-        darkTheme -> DarkColorScheme
-        else -> LightColorScheme
-    }
+    val colorScheme = if (darkTheme) SanctuaryDarkColorScheme else SanctuaryLightColorScheme
 
     MaterialTheme(
         colorScheme = colorScheme,
         typography = Typography,
         content = content
     )
+}
+
+@Composable
+fun AlphonsoTheme(
+    darkTheme: Boolean = true,
+    dynamicColor: Boolean = false,
+    content: @Composable () -> Unit
+) {
+    SanctuaryTheme(darkTheme = darkTheme, content = content)
 }

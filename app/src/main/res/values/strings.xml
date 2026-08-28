@@ -1,7 +1,7 @@
 <resources>
-    <string name="app_name">Alphonso</string>
-    <string name="accessibility_service_label">Alphonso Consciousness</string>
-    <string name="accessibility_service_description">AI-powered content filter that monitors screen content to protect the user.</string>
-    <string name="device_admin_label">Alphonso Admin</string>
-    <string name="device_admin_description">Required to block applications and prevent uninstallation.</string>
+    <string name="app_name">Sanctuary</string>
+    <string name="accessibility_service_label">Sanctuary Conscience Sentinel</string>
+    <string name="accessibility_service_description">Catholic moral shield &amp; always-on on-device conscience sentinel protecting virtue and digital purity.</string>
+    <string name="device_admin_label">Sanctuary Moral Guard Admin</string>
+    <string name="device_admin_description">Required for anti-tamper security, protecting settings, and preventing unauthorized disablement.</string>
 </resources>
